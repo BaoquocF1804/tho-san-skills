@@ -1,0 +1,8 @@
+# Only the hunter skills are published; the other skills in this folder stay local.
+/*
+!/.gitignore
+!/tho-san/
+!/tho-san-co-phieu/
+__pycache__/
+.ruff_cache/
+.pytest_cache/
