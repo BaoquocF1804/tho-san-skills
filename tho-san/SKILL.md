@@ -62,6 +62,12 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
   `hermes send --to telegram --subject "🎯 Thợ săn <dd/mm HH:MM>" --file /tmp/tho-san/tg-<...>.md`
 - Exit khác 0 thì báo người dùng kèm lỗi, không thử lại liên tục. Người dùng nói "không gửi" thì bỏ bước này.
 
+## Ghi bảng điểm crypto-desk (nếu máy có `~/crypto-desk-rewrite`)
+- Báo cáo xong thì ghi từng lệnh (vào ngay và `limit`) đúng mức trong báo cáo, để chấm cùng thước đo với hunter của crypto-desk:
+  `~/crypto-desk-rewrite/scripts/desk log-call LONG|SHORT SYM --entry E --stop S --target T --note "<lý do 1 câu>"`
+- Lệnh chờ kiểu `stop` chưa ghi được (script từ chối, báo lại người dùng). Người dùng nói "không ghi" thì bỏ bước này.
+- Kết quả xem bằng `~/crypto-desk-rewrite/scripts/desk scorecard`, dòng `tho-san`.
+
 ## Lỗi thường gặp
 | Lỗi | Cách đúng |
 |---|---|
