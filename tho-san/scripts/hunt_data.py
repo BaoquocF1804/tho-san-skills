@@ -6,10 +6,12 @@
   python3 hunt_data.py detail SYMBOL [SYMBOL ...]
       levels in ATRs, positioning, last daily candles, today's candle, recent 4h bars
   python3 hunt_data.py plan LONG|SHORT SYMBOL --stop X --target Y [--entry E] [--capital 1000]
-      checks the risk rules against a fresh mark and ATR, then sizes the position
+      checks the risk rules against a fresh mark and ATR, then sizes the position; on PASS prints the TG: lines
+      the report pastes and the DESK: log-call line, so no level is retyped
 
 Indicators are textbook: EMA seeded with an SMA, Wilder RSI/ATR on closed candles, swing
-points with two bars on each side (de-clustered by 0.25 ATR, including S/R flip levels).
+points with two bars on each side over all 259 closed days plus the fresh 20/55-day extremes
+(de-clustered by 0.25 ATR, including S/R flip levels).
 Read-only public endpoints; nothing here can trade.
 """
 
@@ -28,7 +30,9 @@ from pathlib import Path
 
 BASE = "https://fapi.binance.com"
 OUT = Path("/tmp/tho-san/market.json")
-STABLES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "RLUSD", "USD1"}
+# USD stablecoins, plus tokenized gold (gold's hours and ATR). Binance tags gold RWA like the real
+# tokens MANTRA and CFG, so it is excluded by name.
+EXCLUDED_BASES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "RLUSD", "USD1", "PAXG", "XAUT"}
 PUMP_CHANGE_24H = 25.0  # percent: today's move is not in the closed-candle ATR yet
 PUMP_FUNDING = 0.005  # per interval, near the exchange cap: one side is paying to stay in
 TAKER_FEE_ROUNDTRIP = 0.001  # 0.05% entry + 0.05% exit on Binance USDⓈ-M
@@ -43,7 +47,7 @@ def get(path: str, **params):
             with urllib.request.urlopen(request, timeout=20) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
-            if exc.code not in (418, 429) and exc.code < 500:
+            if exc.code not in (408, 418, 429) and exc.code < 500:
                 raise
         except urllib.error.URLError:
             pass
@@ -112,7 +116,7 @@ def symbol_meta(info) -> dict[str, dict]:
     for s in info["symbols"]:
         if (s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT"
                 and s.get("status") == "TRADING" and s.get("underlyingType") == "COIN"
-                and s.get("baseAsset") not in STABLES):
+                and s.get("baseAsset") not in EXCLUDED_BASES):
             f = {x["filterType"]: x for x in s["filters"]}
             meta[s["symbol"]] = {
                 "tick": f["PRICE_FILTER"]["tickSize"],
@@ -132,11 +136,16 @@ def features(sym: str, meta: dict, ticker: dict, premium: dict, btc_chg20: float
     c4 = [float(k[4]) for k in h4]
     mark = float(premium["markPrice"])
     a = atr(h, lo, c)
-    sh, sl = swings(h, lo)
+    sh, sl = swings(h, lo, lookback=len(h))  # every loaded day; plan's stop check stays at 120
+    hi20, lo20 = max(h[-20:], default=None), min(lo[-20:], default=None)  # listing day has no closed candle
+    hi55, lo55 = max(h[-55:], default=None), min(lo[-55:], default=None)
+    # A swing needs two later days, so a fresh 20/55-day extreme is not one yet; without it a
+    # breakout past every swing leaves that side empty.
+    levels = sh + sl + [x for x in (hi20, lo20, hi55, lo55) if x is not None]
     min_gap = (a or 0) * 0.25
     # Include both swing highs and broken swing lows (S/R flip) sorted from mark outward
-    res_candidates = sorted(x for x in (sh + sl) if x > mark)
-    sup_candidates = sorted((x for x in (sl + sh) if x < mark), reverse=True)
+    res_candidates = sorted(x for x in levels if x > mark)
+    sup_candidates = sorted((x for x in levels if x < mark), reverse=True)
     oi = [float(x["sumOpenInterestValue"]) for x in get(
         "/futures/data/openInterestHist", symbol=sym, period="1d", limit=30)]
     ls = [float(x["longShortRatio"]) for x in get(
@@ -158,8 +167,7 @@ def features(sym: str, meta: dict, ticker: dict, premium: dict, btc_chg20: float
         "ema20_4h": ema(c4, 20), "ema50_4h": ema(c4, 50),
         "rsi1d": rsi(c), "rsi4h": rsi(c4),
         "atr": a, "atr_pct": None if not a else a / mark * 100,
-        "hi20": max(h[-20:], default=None), "lo20": min(lo[-20:], default=None),  # listing day has no closed candle
-        "hi55": max(h[-55:], default=None), "lo55": min(lo[-55:], default=None),
+        "hi20": hi20, "lo20": lo20, "hi55": hi55, "lo55": lo55,
         "res": decluster(res_candidates, min_gap)[:3],
         "sup": decluster(sup_candidates, min_gap)[:3],
         "vol7_vs_30": round((sum(v[-7:]) / 7) / (sum(v[-30:]) / 30), 2) if len(v) >= 30 else None,
@@ -240,7 +248,8 @@ def detail(args) -> None:
     g = lambda x: "-" if x is None else f"{x:.6g}"  # noqa: E731
     for sym in (s.upper() for s in args.symbols):
         if sym not in meta:
-            print(f"\n### {sym}: not a TRADING USDT perpetual on Binance USDⓈ-M")
+            print(f"\n### {sym}: not a TRADING crypto USDT perpetual on Binance USDⓈ-M"
+                  " (stablecoins and gold are left out)")
             continue
         ticker = get("/fapi/v1/ticker/24hr", symbol=sym)
         r = features(sym, meta[sym], ticker, get("/fapi/v1/premiumIndex", symbol=sym), None)
@@ -273,15 +282,27 @@ def plan(args) -> None:
     sym, side = args.symbol.upper(), args.side.upper()
     meta = symbol_meta(get("/fapi/v1/exchangeInfo")).get(sym)
     if meta is None:
-        raise SystemExit(f"{sym} is not a TRADING USDT perpetual on Binance USDⓈ-M")
+        raise SystemExit(f"{sym} is not a TRADING crypto USDT perpetual on Binance USDⓈ-M"
+                         " (stablecoins and gold are left out)")
     mark = float(get("/fapi/v1/premiumIndex", symbol=sym)["markPrice"])
     k1d = get("/fapi/v1/klines", symbol=sym, interval="1d", limit=260)
     h, lo, c = ([float(k[i]) for k in k1d[:-1]] for i in (2, 3, 4))  # closed days: same ATR as scan/detail
     a = atr(h, lo, c)
     if a is None:
         raise SystemExit(f"{sym}: fewer than 15 closed daily candles, so no ATR14 yet — skip this contract")
-    entry = args.entry or mark
+    entry, note = args.entry or mark, ""
     sign = 1 if side == "LONG" else -1
+    if abs(entry / mark - 1) <= args.entry_band:
+        order = "vào ngay"
+        # A market order fills around the mark: size it from whichever of the two is worse.
+        worse = max(entry, mark) if side == "LONG" else min(entry, mark)
+        if worse != entry:
+            note = f"vào ngay khớp quanh mark: tính từ {worse:.10g} thay vì entry {entry:.10g}"
+            entry = worse
+    elif (side == "LONG" and entry < mark) or (side == "SHORT" and entry > mark):
+        order = "lệnh chờ (limit)"
+    else:
+        order = "lệnh chờ (stop)"
     risk_unit, reward_unit = (entry - args.stop) * sign, (args.target - entry) * sign
     limit = max_stop_fraction(args.leverage, meta["mmr"])
     if risk_unit <= 0 or reward_unit <= 0:
@@ -307,23 +328,32 @@ def plan(args) -> None:
         qty >= min_qty and notional >= float(meta["min_notional"]))
     liq = entry * (1 - 1 / args.leverage + meta["mmr"]) if side == "LONG" else entry * (
         1 + 1 / args.leverage - meta["mmr"])
-    if abs(entry / mark - 1) <= args.entry_band:
-        order = "vào ngay"
-    elif (side == "LONG" and entry < mark) or (side == "SHORT" and entry > mark):
-        order = "lệnh chờ (limit)"
-    else:
-        order = "lệnh chờ (stop)"
     print(f"{side} {sym} x{args.leverage} | mark {mark:.6g} | ATR14d {a:.6g} ({a / mark * 100:.2f}%)"
           f" | {order}")
+    if note:
+        print(note)
     print(f"entry {entry:.6g}  stop {args.stop:.6g} ({(args.stop / entry - 1) * 100:+.2f}%,"
           f" {risk_unit / a:.2f} ATR)  target {args.target:.6g} ({(args.target / entry - 1) * 100:+.2f}%)"
           f"  R:R {reward_unit / risk_unit:.2f} (net ~{net_rr:.2f})")
-    print(f"size {qty.normalize()} (step {meta['step']}) notional {notional:.2f} margin "
+    print(f"size {qty.normalize():f} (step {meta['step']}) notional {notional:.2f} margin "
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
     for name, ok in checks.items():
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
-    print("VERDICT:", "PASS" if all(checks.values()) else "FAIL — fix the levels or drop the trade")
+    passed = all(checks.values())
+    print("VERDICT:", "PASS" if passed else "FAIL — fix the levels or drop the trade")
+    if passed:
+        # Report-ready lines: the report pastes TG:, the desk runs DESK:, so no level gets retyped.
+        kind = {"vào ngay": "Vào ngay", "lệnh chờ (limit)": "Limit", "lệnh chờ (stop)": "Stop"}[order]
+        print(f"TG: {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'} {sym} — {kind}")
+        print(f"TG: • Vào: {entry:.10g} | Stop: {args.stop:.10g} ({(args.stop / entry - 1) * 100:+.2f}%,"
+              f" {risk_unit / a:.2f} ATR) | TP: {args.target:.10g} ({(args.target / entry - 1) * 100:+.2f}%)"
+              f" | R:R: {reward_unit / risk_unit:.2f}")
+        print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f}"
+              f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
+        if order != "lệnh chờ (stop)":  # the desk cannot grade stop entries yet
+            print(f"DESK: ~/crypto-desk-rewrite/scripts/desk log-call {side} {sym}"
+                  f" --entry {entry:.10g} --stop {args.stop:.10g} --target {args.target:.10g}")
 
 
 def main() -> None:

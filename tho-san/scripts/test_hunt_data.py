@@ -81,6 +81,32 @@ def test_scan_survives_a_contract_listed_today(monkeypatch, capsys, tmp_path):
     assert new_row.split()[1] == "ATR"  # no ATR14 yet, so not tradeable
 
 
+def test_scan_leaves_out_tokenized_gold(monkeypatch, capsys, tmp_path):
+    # PAXGUSDT ranked 29th on 31/10 and was flagged OK: gold's hours and ATR, not a crypto perp.
+    _fake_exchange(monkeypatch, tmp_path, {"BTCUSDT": 60, "PAXGUSDT": 60, "XAUTUSDT": 60, "ETHUSDT": 60})
+    out = _run(monkeypatch, capsys, "scan")
+    assert "ETHUSDT" in out
+    assert "PAXGUSDT" not in out and "XAUTUSDT" not in out
+
+
+def test_levels_reach_old_swings_and_a_fresh_extreme(monkeypatch):
+    # 31/10: BEAMX had cleared every 120-day swing high, so detail printed resistance [].
+    highs = [104.0] * 259
+    highs[20] = 130.0  # a swing high 238 days back
+    highs[-1] = 120.0  # yesterday's high: no two later days yet, so not a swing point
+    t0 = int(START.timestamp() * 1000)
+    bars = [[t0 + i * 86_400_000, "100", str(high), "96", "100", "1000", 0, "100000", 10, "500", "50000", "0"]
+            for i, high in enumerate(highs + [104.0])]  # plus the forming day
+
+    def get(path: str, **params):
+        return bars[-params["limit"]:] if path == "/fapi/v1/klines" else [HISTORY[path]] * params["limit"]
+
+    monkeypatch.setattr(hd, "get", get)
+    row = hd.features("COINUSDT", {}, {"quoteVolume": "90000000", "priceChangePercent": "3"},
+                      {"markPrice": "115", "lastFundingRate": "0.0001"}, None)
+    assert row["res"] == [120.0, 130.0]
+
+
 def test_detail_prints_a_contract_too_new_for_atr14(monkeypatch, capsys, tmp_path):
     _fake_exchange(monkeypatch, tmp_path, {"NEWUSDT": 8})
     out = _run(monkeypatch, capsys, "detail", "NEWUSDT")
@@ -109,6 +135,42 @@ def test_plan_fails_a_stop_hugging_a_daily_high_or_low(monkeypatch, capsys, tmp_
     out = _run(monkeypatch, capsys, "plan", side, "COINUSDT", "--stop", stop, "--target", target,
                "--leverage", "2", *(["--entry", entry] if entry else []))
     assert f"VERDICT: {verdict}" in out
+    assert ("DESK:" in out) == (verdict == "PASS")  # nothing to copy from a failed plan
+
+
+@pytest.mark.parametrize("side, entry, stop, target, want", [
+    ("LONG", "99.8", "85", "125", "entry 100  stop 85 (-15.00%"),  # fills near the 100 mark, not at 99.8
+    ("SHORT", "100.3", "115", "75", "entry 100  stop 115 (+15.00%"),
+    ("LONG", "95", "80", "125", "entry 95  stop 80 (-15.79%"),  # a limit fills at its own price
+])
+def test_plan_sizes_a_market_entry_from_the_worse_of_entry_and_mark(monkeypatch, capsys, tmp_path,
+                                                                     side, entry, stop, target, want):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    out = _run(monkeypatch, capsys, "plan", side, "COINUSDT", "--entry", entry, "--stop", stop,
+               "--target", target, "--leverage", "2")
+    assert want in out
+
+
+def test_plan_prints_the_lines_the_report_and_desk_copy(monkeypatch, capsys, tmp_path):
+    # Retyped levels drifted: the 31/10 report plan-gated an ETH stop at 2462 but logged 2455.
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75",
+               "--leverage", "2")
+    lines = [line for line in out.splitlines() if line.startswith(("TG:", "DESK:"))]
+    assert lines[0] == "TG: 🔴 SHORT COINUSDT — Vào ngay"
+    assert lines[1].startswith("TG: • Vào: 100 | Stop: 114 (+14.00%, ")
+    assert lines[2].startswith("TG: • Size: ")
+    assert lines[3] == ("DESK: ~/crypto-desk-rewrite/scripts/desk log-call SHORT COINUSDT"
+                        " --entry 100 --stop 114 --target 75")
+
+
+def test_plan_gives_a_breakout_stop_order_no_desk_line(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})  # SHORT under the mark: a stop entry
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--entry", "95", "--stop", "107",
+               "--target", "75", "--leverage", "2")
+    assert "VERDICT: PASS" in out
+    assert "TG: 🔴 SHORT COINUSDT — Stop" in out
+    assert "DESK:" not in out  # the desk cannot grade stop entries yet
 
 
 def test_detail_marks_only_the_forming_4h_bar_live(monkeypatch, capsys, tmp_path):
