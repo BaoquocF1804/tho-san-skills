@@ -122,6 +122,49 @@ def test_plan_fails_a_stop_hugging_a_daily_high_or_low(monkeypatch, capsys, frid
     _fake_exchange(monkeypatch, bars)
     out = _plan(monkeypatch, capsys, "--entry", entry, "--stop", stop, "--target", "120")
     assert f"VERDICT: {verdict}" in out
+    assert ("TG:" in out) == (verdict == "PASS")  # nothing to copy from a failed plan
+
+
+def test_plan_sizes_a_market_entry_from_the_worse_of_entry_and_mark(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    out = _plan(monkeypatch, capsys, "--entry", "99.8", "--stop", "95", "--target", "110")
+    assert "entry 100  stop 95 (-5.00%" in out  # a market order fills near the 100 mark, not at 99.8
+
+
+def test_plan_prints_the_lines_the_report_copies(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    out = _plan(monkeypatch, capsys, "--stop", "95", "--target", "110")
+    lines = [line for line in out.splitlines() if line.startswith("TG:")]
+    assert lines[0] == "TG: 🟢 LONG TESTUSDT [US] (TEST) — Vào ngay"
+    assert lines[1].startswith("TG: • Vào: 100 | Stop: 95 (-5.00%, ")
+    assert lines[2].startswith("TG: • Size: ")
+    assert lines[3] == "TG: • Cơ bản & KQKD: Rev YoY -, P/E - | KQKD: -"
+    assert "DESK:" not in out  # stock calls are not logged on the crypto desk
+
+
+def test_news_gives_a_us_ticker_direct_links_and_its_8k_filings(monkeypatch, capsys):
+    today = datetime.now(timezone.utc).date()
+    recent = {
+        "form": ["8-K", "10-Q", "8-K"],
+        "filingDate": [str(today - timedelta(days=d)) for d in (2, 5, 60)],
+        "items": ["2.02,9.01", "", "5.02"],
+        "accessionNumber": ["0000123-26-000001", "0000123-26-000002", "0000123-26-000003"],
+        "primaryDocument": ["q3.htm", "10q.htm", "old.htm"],
+    }
+    yahoo = [{"published": "Fri, 30 Oct 2026 14:56:49 +0000", "source": "247wallst.com",
+              "title": "Test Corp beats", "link": "https://247wallst.com/test-corp-beats/"}]
+    monkeypatch.setattr(h, "load_sec_tickers", lambda: {"TEST": (123, "Test Corp")})
+    monkeypatch.setattr(h, "fetch_tv_fundamentals_batch", lambda bases: {})
+    monkeypatch.setattr(h, "_fetch_google_rss", lambda query, limit=8: [])
+    monkeypatch.setattr(h, "_fetch_yahoo_rss", lambda ticker, limit=8: yahoo if ticker == "TEST" else [])
+    monkeypatch.setattr(h, "get_sec_json", lambda url: {"filings": {"recent": recent}})
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "news", "TEST"])
+    h.main()
+    out = capsys.readouterr().out
+    assert "https://247wallst.com/test-corp-beats/" in out  # the article itself, not a news.google.com redirect
+    assert "8-K ! 2.02 KQKD" in out
+    assert "https://www.sec.gov/Archives/edgar/data/123/000012326000001/q3.htm" in out
+    assert "10q.htm" not in out and "old.htm" not in out  # not an 8-K, and older than 30 days
 
 
 def test_detail_marks_only_the_forming_4h_bar_live(monkeypatch, capsys):

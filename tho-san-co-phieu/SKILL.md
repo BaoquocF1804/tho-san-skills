@@ -34,7 +34,8 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
    - Chỉ săn mã cờ `OK`. Bỏ `ATR` (quá biến động cho x5, hoặc chưa đủ 15 phiên để tính ATR), `PUMP` (nhảy ≥ 20%/24h hoặc funding cực đoan), `INDEX`.
    - Cột `earn`: `Xd!` là KQKD trong ≤ 7 ngày, `Xd` là còn X ngày, `-Xd` là vừa công bố X ngày trước. `7d`/`20d` tính theo phiên.
 2. **Tin tức. REQUIRED SUB-SKILL:** agent-reach.
-   - Chạy `hunt_stock_data.py news SYM1 SYM2 ...`: Google News RSS cho Phố Wall, châu Á, Fed/lợi suất, chip/thuế quan và từng mã theo tên công ty.
+   - Chạy `hunt_stock_data.py news SYM1 SYM2 ...`: Google News RSS cho Phố Wall, châu Á, Fed/lợi suất, chip/thuế quan. Mã niêm yết ở Mỹ (`US`/`ADR`) lấy RSS Yahoo Finance theo mã, có link bài gốc (link Google News chỉ là link chuyển hướng); mã châu Á và `PRE` tìm qua Google News theo tên công ty.
+   - Mã nộp hồ sơ SEC có thêm mục `SEC 8-K/6-K 30 ngày`: dòng có `!` (KQKD, đổi lãnh đạo, hợp đồng lớn, M&A, nợ mới, suy giảm tài sản, hủy niêm yết, phá sản…) là chất xúc tác: mở link SEC đọc trước khi dựng setup.
    - Bổ sung: `agent-reach doctor --text` trước, rồi `agent-reach web search "..." --limit 5` **tuần tự, cách nhau khoảng 15 giây**; đọc bài chính bằng `agent-reach web read <url>`. agent-reach lỗi thì dùng web search có sẵn của runtime (`WebSearch` trên Claude Code, `search_web` trên Gemini).
    - Phải đủ bốn nhóm, mỗi tin có ngày (bỏ tin không ngày):
      - vĩ mô Mỹ và châu Á 48 giờ qua: S&P 500, Nasdaq, KOSPI, Hang Seng, lợi suất 10 năm Mỹ, Fed/FOMC, thuế quan, kiểm soát xuất khẩu chip
@@ -43,13 +44,13 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
      - giờ sàn cơ sở (giờ VN): Mỹ/ADR 20:30–03:00 khi Mỹ theo giờ mùa hè (Chủ nhật thứ hai tháng 3 đến Chủ nhật đầu tiên tháng 11), còn lại 21:30–04:00; Hàn 07:00–13:30; Hồng Kông 08:30–11:00 và 12:00–15:00; A-share 08:30–10:30 và 12:00–14:00. Ngoài giờ sàn cơ sở thanh khoản mỏng, dễ gap khi mở phiên
 3. **Soi kỹ 3–6 mã:** `hunt_stock_data.py detail SYM1 SYM2 ...` (mức giá theo ATR, vị thế nhỏ lẻ và top trader, định giá và tăng trưởng quy USD, bảng quý SEC nếu công ty nộp 10-Q, nến hôm nay, nến 4h).
 4. **Dựng setup, chiều nào cũng được:** ưu tiên LONG cổ phiếu tăng trưởng doanh thu/EPS mạnh, hưởng lợi chu kỳ ngành (HBM/AI/Cloud/Robotics) đang hồi về hỗ trợ/EMA; ưu tiên SHORT cổ phiếu suy giảm cơ bản, định giá quá cao, hoặc nhỏ lẻ fomo quá nóng khi gãy cấu trúc. Stop đặt ở mức luận điểm sai **và** vượt qua đỉnh/đáy swing gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
-5. **Kiểm từng lệnh ngay trước khi báo:** `hunt_stock_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C] [--horizon-days N]`. `FAIL` thì sửa mức hoặc bỏ lệnh. Khối lượng, ký quỹ, rủi ro, giá thanh lý, độ lệch mark–index và dòng KQKD chép từ output, không tự tính.
+5. **Kiểm từng lệnh ngay trước khi báo:** `hunt_stock_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C] [--horizon-days N]`. `FAIL` thì sửa mức hoặc bỏ lệnh. Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark. `PASS` thì `plan` in sẵn 4 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý; Cơ bản & KQKD): báo cáo dán nguyên văn các dòng này (bỏ tiền tố `TG: `). Không gõ lại con số nào. Độ lệch mark–index và dòng KQKD cũng chép từ output.
 
 ## Báo cáo trên khung chat (tiếng Việt, đúng thứ tự)
 1. Một dòng kết luận: có hay không có lệnh hạng A (vào ngay / lệnh chờ), bao nhiêu lệnh, thuộc những thị trường nào (`US`, `ADR`, `KR`, `HK`, `CN`, `PRE`).
 2. Bối cảnh vĩ mô (Phố Wall và châu Á): tối đa 5 gạch đầu dòng, mỗi ý có ngày.
-3. Mỗi lệnh vào ngay: tiêu đề `### 🟢 LONG SYM [MKT] (R:R x)` hoặc `🔴 SHORT`; bảng Vào | Stop | Target | Khối lượng | Ký quỹ | Rủi ro | Thanh lý; dòng KQKD từ `plan`; rồi **Cơ bản & KQKD**, **Kỹ thuật & Vị thế**, **Phản biện**, **Sai nếu**.
-4. Lệnh chờ: ghi rõ `limit` hay `stop`, mức vào, stop, target, R:R, phân tích Cơ bản + Kỹ thuật + Phản biện + Sai nếu, hiệu lực 24 giờ. Nếu `/tmp/tho-san-co-phieu/` có báo cáo dưới 24 giờ, ghi rõ từng lệnh chờ của báo cáo đó còn giữ, hủy hay thay bằng lệnh nào.
+3. Mỗi lệnh vào ngay: tiêu đề `### 🟢 LONG SYM [MKT] (R:R x)` hoặc `🔴 SHORT`; 4 dòng `TG:` của `plan`, nguyên văn, bỏ tiền tố; dòng KQKD từ `plan`; rồi **Cơ bản & KQKD**, **Kỹ thuật & Vị thế**, **Phản biện**, **Sai nếu**.
+4. Lệnh chờ: như lệnh vào ngay (dòng `TG:` đầu đã ghi `Limit` hay `Stop`), hiệu lực 24 giờ. Nếu `/tmp/tho-san-co-phieu/` có báo cáo dưới 24 giờ, ghi rõ từng lệnh chờ của báo cáo đó còn giữ, hủy hay thay bằng lệnh nào.
 5. Đã loại: mỗi mã một dòng kèm lý do (cơ bản, kỹ thuật, dính KQKD, hoặc cờ `ATR`/`PUMP`/`INDEX`).
 6. Quản lý rủi ro: tương quan với Nasdaq/S&P 500/KOSPI/Hang Seng; rủi ro gap khi mở phiên sàn cơ sở; điều kiện đóng sớm.
 7. Nguồn: link các bài báo và dữ liệu BCTC đã dùng.
@@ -61,10 +62,7 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
   - **Dòng đầu:** Kết luận ngắn (số lệnh vào ngay / lệnh chờ).
   - **Bối cảnh Vĩ mô:** tối đa 3 gạch đầu dòng, mỗi dòng 1 câu ngắn kèm ngày.
   - **Mỗi lệnh (vào ngay hoặc chờ):**
-    - `🟢 LONG SYM [MKT]` hoặc `🔴 SHORT SYM [MKT]` (`Tên công ty`) — `Vào ngay` / `Limit` / `Stop`
-    - `• Vào: ... | Stop: ... (...%, ... ATR) | TP: ... (...%) | R:R: ...`
-    - `• Size: ... (... USDT) | Ký quỹ: ... | Rủi ro: ... | Thanh lý: ~...`
-    - `• Cơ bản & KQKD: Rev YoY ...%, P/E ... | KQKD: ...`
+    - 4 dòng `TG:` của `plan`, nguyên văn, bỏ tiền tố `TG: `
     - `• Lý do: <1 câu ngắn>`
     - `• Sai nếu: <mức đóng sớm / hủy lệnh>`
   - **Lệnh chờ cũ** (khi có báo cáo dưới 24 giờ): 1 dòng giữ / hủy / thay.
@@ -88,3 +86,5 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
 | Phân tích BCTC cho mã `PRE` | Mã `PRE` chưa niêm yết, không có BCTC; chỉ dựa vào tin và vị thế |
 | Ba lệnh cùng chiều cùng nhóm ngành (bán dẫn/AI) không cảnh báo | Nêu tương quan, khuyên tối đa 2 lệnh cùng nhóm |
 | Bịa số hoặc mức giá | Chỉ dùng số từ script và bài có nguồn |
+| Gõ lại số vào báo cáo hoặc Telegram, lệch với `plan` | Dán các dòng `TG:` của lần `plan` cuối |
+| Trích link news.google.com cho mã Mỹ | Dùng link bài gốc trong mục Yahoo của `news` |

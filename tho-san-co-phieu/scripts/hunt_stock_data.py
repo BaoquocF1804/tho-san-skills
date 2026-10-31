@@ -15,11 +15,14 @@ Commands:
   python3 hunt_stock_data.py detail SYMBOL [SYMBOL ...]
       levels in ATRs, positioning, global fundamentals (TradingView + SEC EDGAR 10-Q/10-K/20-F/6-K), earnings dates, 1d/4h bars
   python3 hunt_stock_data.py news [SYMBOL ...]
-      Google News RSS for global/US/Asia macro + each stock symbol (using resolved company name) with dates
+      Google News RSS for global/US/Asia macro; per symbol Yahoo Finance RSS (direct links) + SEC 8-K/6-K of the
+      last 30 days for US-listed filers, Google News by company name for the rest; all with dates
   python3 hunt_stock_data.py plan LONG|SHORT SYMBOL --stop X --target Y [--entry E] [--capital 1000] [--horizon-days 20]
-      checks mark-index deviation, ATR/liquidation stop bounds, R:R, earnings inside the holding window, and sizes position
+      checks mark-index deviation, ATR/liquidation stop bounds, R:R, earnings inside the holding window, and sizes position;
+      on PASS prints the TG: lines the report pastes verbatim
 
-Read-only public endpoints (Binance fapi + TradingView Scanner + SEC EDGAR + Google News RSS); nothing here can trade.
+Read-only public endpoints (Binance fapi + TradingView Scanner + SEC EDGAR + Google News and Yahoo Finance RSS);
+nothing here can trade.
 """
 
 from __future__ import annotations
@@ -937,10 +940,7 @@ def detail(args) -> None:
                   f" taker-buy {buy:.0f}%{'  LIVE, not closed' if k is bars[-1] else ''}")
 
 
-def _fetch_google_rss(query: str, limit: int = 8) -> list[dict[str, str]]:
-    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(
-        {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}
-    )
+def _rss_items(url: str, limit: int) -> list[dict[str, str]]:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         xml_bytes = resp.read()
@@ -950,9 +950,57 @@ def _fetch_google_rss(query: str, limit: int = 8) -> list[dict[str, str]]:
         title = (item.findtext("title") or "").strip()
         link = (item.findtext("link") or "").strip()
         pub = (item.findtext("pubDate") or "").strip()
-        source = (item.findtext("source") or "").strip()
+        # Yahoo items carry no <source>, so name the site from the link
+        source = (item.findtext("source") or "").strip() or urllib.parse.urlparse(link).netloc.removeprefix("www.")
         items.append({"published": pub, "source": source, "title": title, "link": link})
     return items
+
+
+def _fetch_google_rss(query: str, limit: int = 8) -> list[dict[str, str]]:
+    return _rss_items("https://news.google.com/rss/search?" + urllib.parse.urlencode(
+        {"q": query, "hl": "en-US", "gl": "US", "ceid": "US:en"}), limit)
+
+
+def _fetch_yahoo_rss(ticker: str, limit: int = 8) -> list[dict[str, str]]:
+    return _rss_items("https://feeds.finance.yahoo.com/rss/2.0/headline?" + urllib.parse.urlencode(
+        {"s": ticker, "region": "US", "lang": "en-US"}), limit)
+
+
+def _ticker_news(ticker: str, query: str, limit: int) -> list[dict[str, str]]:
+    """Yahoo's per-ticker feed links the articles themselves; Google News (redirect links) when it fails."""
+    try:
+        items = _fetch_yahoo_rss(ticker, limit)
+    except (OSError, ET.ParseError):
+        items = []
+    return items or _fetch_google_rss(query, limit)
+
+
+# SEC Form 8-K items; "!" marks the ones that move a stock.
+EIGHT_K_ITEMS = {
+    "1.01": "hợp đồng lớn", "1.03": "phá sản", "1.05": "sự cố an ninh mạng", "2.01": "mua/bán tài sản",
+    "2.02": "KQKD", "2.03": "nợ mới", "2.06": "suy giảm tài sản", "3.01": "hủy niêm yết",
+    "4.02": "BCTC cũ không còn tin cậy", "5.02": "thay đổi lãnh đạo", "7.01": "Reg FD",
+    "8.01": "sự kiện khác", "9.01": "phụ lục",
+}
+EIGHT_K_KEY = {"1.01", "1.03", "1.05", "2.01", "2.02", "2.03", "2.06", "3.01", "4.02", "5.02"}
+
+
+def recent_current_reports(cik: int, days: int = 30) -> list[str]:
+    """8-K/6-K filings of the last `days` days as printable lines, newest first."""
+    sub = get_sec_json(f"https://data.sec.gov/submissions/CIK{cik:010d}.json") or {}
+    recent = sub.get("filings", {}).get("recent", {})
+    since = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
+    columns = ("form", "filingDate", "items", "accessionNumber", "primaryDocument")
+    lines = []
+    for form, filed, items, acc, doc in zip(*(recent.get(k, []) for k in columns)):
+        if form not in ("8-K", "6-K") or filed < since:
+            continue
+        codes = [c for c in str(items).split(",") if c]
+        flag = " !" if EIGHT_K_KEY & set(codes) else ""
+        what = ", ".join(f"{c} {EIGHT_K_ITEMS.get(c, '')}".strip() for c in codes)
+        lines.append(f"  [{filed}] {form}{flag} {what}".rstrip())
+        lines.append(f"    https://www.sec.gov/Archives/edgar/data/{cik}/{acc.replace('-', '')}/{doc}")
+    return lines
 
 
 def news(args) -> None:
@@ -965,6 +1013,8 @@ def news(args) -> None:
         ("FED & YIELDS", '(Fed OR FOMC OR "Treasury yields") when:3d'),
         ("CHIPS & TARIFFS", '(semiconductor OR chip) (tariff OR "export controls") when:3d'),
     ]
+    sections = [(label, q, lambda q=q: _fetch_google_rss(q, limit=args.limit)) for label, q in queries]
+    filers: dict[str, int] = {}
     for base in bases:
         tv_info = tv_map.get(base)
         priv = PRIVATE_COMPANIES.get(base)
@@ -983,20 +1033,29 @@ def news(args) -> None:
             .replace(" Limited", "").replace(", Inc.", "").replace(" Inc.", "")
             .replace(" Corp.", "").replace(" Corp", "").strip()
         )
-        queries.append((f"{base} ({company_title})", f"{clean_title} stock OR earnings OR AI when:7d"))
+        label, q = f"{base} ({company_title})", f"{clean_title} stock OR earnings OR AI when:7d"
+        if lookup in sec_map:  # files with the SEC, so US-listed (US or ADR): Yahoo has a feed per ticker
+            sections.append((label, f"yahoo:{lookup}", lambda t=lookup, q=q: _ticker_news(t, q, args.limit)))
+            filers[label] = sec_map[lookup][0]
+        else:
+            sections.append((label, q, lambda q=q: _fetch_google_rss(q, limit=args.limit)))
 
-    for label, q in queries:
+    for label, q, fetch in sections:
         print(f"\n=== NEWS: {label} (query: '{q}') ===")
         try:
-            items = _fetch_google_rss(q, limit=args.limit)
+            items = fetch()
         except Exception as exc:
             print(f"  Error fetching RSS: {exc}")
-            continue
-        if not items:
+            items = None
+        if items == []:
             print("  (no results)")
-        for item in items:
+        for item in items or []:
             print(f"  [{item['published']}] ({item['source']}) {item['title']}")
             print(f"    {item['link']}")
+        if label in filers:
+            print(f"\n=== SEC 8-K/6-K 30 ngày: {label} (! = KQKD, lãnh đạo, hợp đồng lớn, M&A, nợ mới,"
+                  " suy giảm tài sản, hủy niêm yết, BCTC sai, phá sản, an ninh mạng) ===")
+            print("\n".join(recent_current_reports(filers[label])) or "  (no filings)")
 
 
 def plan(args) -> None:
@@ -1025,8 +1084,19 @@ def plan(args) -> None:
     a = atr(h, lo, c)
     if a is None:
         raise SystemExit(f"{sym}: fewer than 15 weekday candles, so no ATR14 yet — skip this contract")
-    entry = args.entry or mark
+    entry, note = args.entry or mark, ""
     sign = 1 if side == "LONG" else -1
+    if abs(entry / mark - 1) <= args.entry_band:
+        order = "vào ngay"
+        # A market order fills around the mark: size it from whichever of the two is worse.
+        worse = max(entry, mark) if side == "LONG" else min(entry, mark)
+        if worse != entry:
+            note = f"vào ngay khớp quanh mark: tính từ {worse:.10g} thay vì entry {entry:.10g}"
+            entry = worse
+    elif (side == "LONG" and entry < mark) or (side == "SHORT" and entry > mark):
+        order = "lệnh chờ (limit)"
+    else:
+        order = "lệnh chờ (stop)"
     risk_unit, reward_unit = (entry - args.stop) * sign, (args.target - entry) * sign
     limit = max_stop_fraction(args.leverage, meta["mmr"])
     if risk_unit <= 0 or reward_unit <= 0:
@@ -1060,19 +1130,15 @@ def plan(args) -> None:
         qty >= min_qty and notional >= float(meta["min_notional"]))
     liq = entry * (1 - 1 / args.leverage + meta["mmr"]) if side == "LONG" else entry * (
         1 + 1 / args.leverage - meta["mmr"])
-    if abs(entry / mark - 1) <= args.entry_band:
-        order = "vào ngay"
-    elif (side == "LONG" and entry < mark) or (side == "SHORT" and entry > mark):
-        order = "lệnh chờ (limit)"
-    else:
-        order = "lệnh chờ (stop)"
 
     print(f"{side} {sym} [{fnd['market']}] ({fnd['company_name']}) x{args.leverage} | mark {mark:.6g} "
           f"| index {index_price:.6g} (dev {mark_index_dev * 100:.3f}%) | ATR14d {a:.6g} ({a / mark * 100:.2f}%) | {order}")
+    if note:
+        print(note)
     print(f"entry {entry:.6g}  stop {args.stop:.6g} ({(args.stop / entry - 1) * 100:+.2f}%,"
           f" {risk_unit / a:.2f} ATR)  target {args.target:.6g} ({(args.target / entry - 1) * 100:+.2f}%)"
           f"  R:R {reward_unit / risk_unit:.2f} (net ~{net_rr:.2f})")
-    print(f"size {qty.normalize()} (step {meta['step']}) notional {notional:.2f} margin "
+    print(f"size {qty.normalize():f} (step {meta['step']}) notional {notional:.2f} margin "
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
     d_since = fnd.get("days_since_earnings")
@@ -1083,7 +1149,21 @@ def plan(args) -> None:
               f"| Kế tiếp: {fnd.get('next_earnings_date') or '-'} (còn ~{d_to if d_to is not None else '-'}d)")
     for name, ok in checks.items():
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
-    print("VERDICT:", "PASS" if all(checks.values()) else "FAIL — fix the levels or drop the trade")
+    passed = all(checks.values())
+    print("VERDICT:", "PASS" if passed else "FAIL — fix the levels or drop the trade")
+    if passed:
+        # Report-ready lines: the report pastes TG:, so no level or number gets retyped.
+        kind = {"vào ngay": "Vào ngay", "lệnh chờ (limit)": "Limit", "lệnh chờ (stop)": "Stop"}[order]
+        rev, pe = fnd.get("rev_yoy_pct"), fnd.get("pe_ttm")
+        print(f"TG: {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'} {sym} [{fnd['market']}]"
+              f" ({fnd['company_name']}) — {kind}")
+        print(f"TG: • Vào: {entry:.10g} | Stop: {args.stop:.10g} ({(args.stop / entry - 1) * 100:+.2f}%,"
+              f" {risk_unit / a:.2f} ATR) | TP: {args.target:.10g} ({(args.target / entry - 1) * 100:+.2f}%)"
+              f" | R:R: {reward_unit / risk_unit:.2f}")
+        print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f}"
+              f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
+        print(f"TG: • Cơ bản & KQKD: Rev YoY {'-' if rev is None else f'{rev:+.1f}%'}, P/E {fmt(pe, 1)}"
+              f" | KQKD: {fnd.get('next_earnings_date') or '-'}{'' if d_to is None else f' (còn ~{d_to}d)'}")
 
 
 def main() -> None:
