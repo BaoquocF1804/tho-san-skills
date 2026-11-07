@@ -3,6 +3,7 @@
 !/.gitignore
 !/tho-san/
 !/tho-san-co-phieu/
+!/tho-san-swing/
 __pycache__/
 .ruff_cache/
 .pytest_cache/
