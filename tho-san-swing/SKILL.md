@@ -7,21 +7,22 @@ description: >-
 # Thợ săn Swing (sổ lệnh giấy)
 
 ## Tổng quan
-Chạy thử bằng sổ lệnh giấy hai chiến lược đã backtest trên hợp đồng cổ phiếu Mỹ của Binance: **RSI(2) của Connors** (mua lúc mở cửa phiên sau) và **Turtle hệ 2**. **Không bao giờ đặt lệnh thật.**
+Chạy thử bằng sổ lệnh giấy hai chiến lược đã backtest trên hợp đồng cổ phiếu Mỹ của Binance: **RSI(2) của Connors** (mua lúc mở cửa phiên sau) và **Turtle 20/10**. **Không bao giờ đặt lệnh thật.**
 - Mọi con số lấy từ [`swing_paper.py`](./scripts/swing_paper.py).
 - Sổ lệnh nằm ở `~/.local/share/tho-san-swing/ledger.json`; không sửa tay.
 
 ## Luật (cố định, không tự chỉnh)
-| | RSI(2) | Turtle hệ 2 |
+| | RSI(2) | Turtle 20/10 |
 |---|---|---|
-| Vào | Đóng cửa > SMA200 và RSI(2) < 5 → mua lúc mở cửa 09:30 New York phiên sau | Lệnh dừng mua khi giá vượt đỉnh 55 phiên (hợp đồng Binance chạy 24/7) |
-| Thoát | Đóng cửa > SMA5 → bán lúc mở cửa phiên sau | Giá thủng max(giá vào − 2N, đáy 20 phiên), N = ATR 20 phiên |
+| Vào | Đóng cửa > SMA200 và RSI(2) < 5 → mua lúc mở cửa 09:30 New York phiên sau | Lệnh dừng mua khi giá vượt đỉnh 20 phiên (hợp đồng Binance chạy 24/7) |
+| Thoát | Đóng cửa > SMA5 → bán lúc mở cửa phiên sau | Giá thủng max(giá vào − 2N, đáy 10 phiên), N = ATR 20 phiên |
 | Vị thế | Tối đa 10, mỗi vị thế 5% vốn | Tối đa 10, mỗi vị thế 5% vốn |
 
 - **Danh sách mã:** hợp đồng cổ phiếu Mỹ trên Binance, không gồm ETF, khối lượng trung vị ≥ 1 triệu USDT/ngày.
 - **Chi phí:** phí 0,05% taker cộng 0,02% trượt giá mỗi chiều, cộng funding thật.
 - **Mốc so sánh:** giữ đều các mã từ ngày bắt đầu sổ.
 - **Backtest gốc:** `~/vintage_book/nill-backtest/results/swing.md`.
+- **Nâng cấp 08/11/2026:** Turtle 20/10 thay 55/20, vì tốt hơn ở cả 4 giai đoạn backtest. Chi tiết ở `~/vintage_book/nill-backtest/results/swing-upgrade.md`.
 
 ## Quy trình
 `swing_paper.py` dưới đây là `python3 ~/.gemini/config/skills/tho-san-swing/scripts/swing_paper.py`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paper trader for the swing hunter: Connors RSI(2) + Turtle System 2 on Binance US stock perps.
+"""Paper trader for the swing hunter: Connors RSI(2) + Turtle 20/10 on Binance US stock perps.
 
 Paper only: nothing here places an order. Fills are taken afterwards from real Binance perp prices.
   python3 swing_paper.py scan [--capital 1000]   # process finished sessions, queue the next orders, report
@@ -26,6 +26,7 @@ LEDGER = HOME / "ledger.json"
 NY = ZoneInfo("America/New_York")
 FEE, SLIP = 0.0005, 0.0002   # Binance taker and slippage, per side (as in the backtest)
 SLOTS, WEIGHT = 10, 0.05     # per sleeve: 10 positions of 5% equity; two sleeves = the 50/50 mix
+TURTLE_IN, TURTLE_OUT = 20, 10  # 11/2026 upgrade: 20/10 beat 55/20 in all four backtest periods (swing.py upgrade)
 MIN_QV = 1_000_000           # median daily quote volume, USDT
 NOT_STOCKS = {"UVXY"}        # ETP the TradingView lookup misses
 YAHOO_TICKER = {"BRKB": "BRK-B"}
@@ -106,7 +107,7 @@ def close_position(L: dict, p: dict, fill: float, when: date, reason: str, mk) -
 
 def turtle_session(L: dict, d: date, mk) -> list[str]:
     """Stop orders resting from the last close through session d's close: entries above the watch levels
-    (the prior 55-day high), exits at each open position's stop. Earliest trigger first; SLOTS cap."""
+    (the prior TURTLE_IN-session high), exits at each open position's stop. Earliest trigger first; SLOTS cap."""
     events, cand = [], []
     for sym, w in L["watch"].items():
         if find(L, "turtle", sym):
@@ -122,14 +123,16 @@ def turtle_session(L: dict, d: date, mk) -> list[str]:
         if kind == "exit":
             if x in L["positions"]:
                 c = close_position(L, x, px * (1 - SLIP), d, "turtle-exit", mk)
-                events.append(f"BÁN {sym} (Turtle, chạm dừng/đáy 20 phiên) @ {c['exit']:.2f}: {c['pnl']:+.2f} USDT")
+                events.append(f"BÁN {sym} (Turtle, chạm dừng/đáy {TURTLE_OUT} phiên) @ {c['exit']:.2f}: "
+                              f"{c['pnl']:+.2f} USDT")
             continue
         if sum(1 for p in L["positions"] if p["sleeve"] == "turtle") >= SLOTS:
             events.append(f"Bỏ qua {sym} (Turtle phá đỉnh nhưng đã đủ {SLOTS} vị thế)")
             continue
         stop = px - 2 * x["N"]
         p = open_position(L, "turtle", sym, px * (1 + SLIP), d, N=x["N"], stop0=stop, stop=stop)
-        events.append(f"MUA {sym} (Turtle, phá đỉnh 55 phiên {x['level']:.2f}) @ {p['entry']:.2f}, dừng {stop:.2f}")
+        events.append(f"MUA {sym} (Turtle, phá đỉnh {TURTLE_IN} phiên {x['level']:.2f}) @ {p['entry']:.2f}, "
+                      f"dừng {stop:.2f}")
         later = next(((t2, min(stop, o)) for t2, o, h, l, c in mk.bars15(sym, d) if t2 > t and l <= stop), None)
         if later:
             c = close_position(L, p, later[1] * (1 - SLIP), d, "turtle-exit", mk)
@@ -166,18 +169,18 @@ def process_session(L: dict, d: date, mk, universe: list[str]) -> list[str]:
         if (p := find(L, "rsi2", sym)) and len(c) >= 5 and c[-1] > sum(c[-5:]) / 5 \
                 and not any(o["sym"] == sym and o["side"] == "sell" for o in L["orders"]):
             L["orders"].append(dict(sleeve="rsi2", sym=sym, side="sell", signal_date=d.isoformat(), rsi=None))
-        if (p := find(L, "turtle", sym)) and len(l) >= 20:
-            p["stop"] = max(p["stop0"], min(l[-20:]))
+        if (p := find(L, "turtle", sym)) and len(l) >= TURTLE_OUT:
+            p["stop"] = max(p["stop0"], min(l[-TURTLE_OUT:]))
         if sym not in universe:
             continue
         if len(c) >= 201 and not find(L, "rsi2", sym) and not any(o["sym"] == sym for o in L["orders"]):
             r2 = rsi(c, 2)[-1]
             if c[-1] > sum(c[-200:]) / 200 and r2 is not None and r2 < 5:
                 cands.append((r2, sym))
-        if len(c) >= 56 and not find(L, "turtle", sym):
+        if len(c) > max(TURTLE_IN, 20) and not find(L, "turtle", sym):
             N = atr_wilder(h, l, c, 20)[-1]
             if N:
-                watch[sym] = dict(level=max(h[-55:]), N=N)
+                watch[sym] = dict(level=max(h[-TURTLE_IN:]), N=N)
     busy = sum(1 for p in L["positions"] if p["sleeve"] == "rsi2") + sum(1 for o in L["orders"] if o["side"] == "buy")
     for r2, sym in sorted(cands):
         if busy >= SLOTS:
@@ -308,7 +311,7 @@ def report(L: dict, events: list[str], new_sessions: int | None) -> None:
         lines += ["Chưa có phiên mới đóng cửa kể từ lần quét trước; sổ giữ nguyên.", ""]
     lines += ["## Vừa xảy ra", *([f"- {e}" for e in events] or ["- Không có lệnh khớp hay thoát."]), "",
               "## Lệnh cho phiên tới (giá mở cửa 09:30 New York)", *([f"- {o}" for o in orders] or ["- Không có."]), "",
-              f"## Turtle: lệnh dừng mua đặt sẵn trên {len(L['watch'])} mã (mua khi vượt đỉnh 55 phiên)",
+              f"## Turtle: lệnh dừng mua đặt sẵn trên {len(L['watch'])} mã (mua khi vượt đỉnh {TURTLE_IN} phiên)",
               *[f"- {s}: đỉnh {w['level']:.2f}, giá đóng cửa {marks[s]:.2f}, còn cách {dist:.1f}N" for dist, s, w in near], "",
               "## Vị thế đang mở", "", "| Mã | Nhóm | Ngày vào | Giá vào | Đóng cửa | Lãi/lỗ tạm (USDT) | Dừng |",
               "| --- | --- | --- | --- | --- | --- | --- |"]
@@ -405,16 +408,23 @@ def selftest() -> None:
     gross = closed[0]["qty"] * (closed[0]["exit"] - closed[0]["entry"])
     costs = FEE * closed[0]["qty"] * (closed[0]["entry"] + closed[0]["exit"]) + 0.0001 * closed[0]["qty"] * closed[0]["entry"]
     assert abs(closed[0]["pnl"] - (gross - costs)) < 1e-9, closed
-    # Turtle: a break of the 55-day high fills at max(level, open); slots cap at SLOTS
-    flat = [(d0 + timedelta(i), 100, 101, 99, 100) for i in range(60)]
+    # Turtle: a break of the prior 20-session high fills at max(level, open); slots cap at SLOTS
+    flat = [(d0 + timedelta(i), 100, 110 if i == 30 else 101, 95 if i == 45 else 99, 100) for i in range(60)]
+    # the 110 high is inside 55 sessions but not 20; the 95 low is inside 20 sessions but not 10
     brk = [(d0 + timedelta(60), 100.5, 103, 100, 102)]
+    drop = [(d0 + timedelta(61), 99.5, 100, 97, 98)]
     syms = [f"S{k}" for k in range(SLOTS + 2)]
-    mk2 = FakeMarket({s: flat + brk for s in syms})
+    mk2 = FakeMarket({s: flat + brk + drop for s in syms})
     T = new_ledger(1000.0, d0 + timedelta(59))
-    process_session(T, d0 + timedelta(59), mk2, syms)               # sets the watch levels at 101
+    process_session(T, d0 + timedelta(59), mk2, syms)               # watch level = prior 20-session high, 101
+    assert all(w["level"] == 101 for w in T["watch"].values()), T["watch"]
     process_session(T, d0 + timedelta(60), mk2, syms)               # every symbol breaks out, only SLOTS fill
     tpos = [p for p in T["positions"] if p["sleeve"] == "turtle"]
     assert len(tpos) == SLOTS and all(abs(p["entry"] - 101 * (1 + SLIP)) < 1e-9 for p in tpos), tpos
+    assert all(p["stop"] == 99 for p in tpos), tpos                  # max(entry - 2N ≈ 96.6, 10-session low 99)
+    process_session(T, d0 + timedelta(61), mk2, syms)               # low 97 breaks the stop at 99
+    tout = [c for c in T["closed"] if c["sleeve"] == "turtle"]
+    assert len(tout) == SLOTS and all(abs(c["exit"] - 99 * (1 - SLIP)) < 1e-9 for c in tout), tout
     print("swing_paper selftest ok")
 
 
