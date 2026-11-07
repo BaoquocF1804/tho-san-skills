@@ -32,10 +32,18 @@ Chạy thử bằng sổ lệnh giấy hai chiến lược đã backtest trên h
    - Chạy lúc nào cũng được: phiên đang mở bị bỏ qua.
 2. Dán nguyên văn báo cáo vào khung chat. Không gõ lại hay tự tính con số.
 3. Gửi Telegram:
-   - Lệnh: `hermes send --to telegram --subject "📒 Thợ săn Swing <dd/mm>" --file <TG_FILE>`. Đường dẫn file nằm ở dòng `TG_FILE:` cuối báo cáo.
+   - Lệnh: `hermes send --to telegram --file <TG_FILE>`. Đường dẫn file nằm ở dòng `TG_FILE:` cuối báo cáo, và dòng đầu của file đã là tiêu đề.
    - Exit khác 0 thì báo người dùng kèm lỗi, không thử lại liên tục.
    - Người dùng nói "không gửi" thì bỏ bước này.
+   - Báo cáo ghi "Chưa có phiên mới" thì không gửi, vì cron đã gửi lúc xử lý phiên đó.
 4. Chỉ xem sổ, không xử lý phiên mới: `swing_paper.py status`.
+
+## Chạy tự động
+- Cron trong WSL chạy `bash scripts/cron_scan.sh` vào phút thứ 7 mỗi giờ.
+  - Script chỉ thật sự xử lý mỗi phiên Mỹ một lần, sau giờ đóng cửa, và gửi Telegram đúng một lần cho phiên đó.
+  - WSL hoặc máy tắt thì lượt chạy kế tiếp tự bù các phiên bị lỡ.
+- Log: `~/.local/share/tho-san-swing/cron.log`.
+- Xem lịch: `crontab -l`. Tắt: xoá dòng `tho-san-swing` bằng `crontab -e`.
 
 ## Lỗi thường gặp
 | Lỗi | Cách đúng |
@@ -46,4 +54,5 @@ Chạy thử bằng sổ lệnh giấy hai chiến lược đã backtest trên h
 | Chạy `scan` nhiều lần mong có lệnh mới | Mỗi phiên chỉ xử lý một lần; chạy lại chỉ in lại báo cáo |
 | Kết luận chiến lược tốt hay xấu sau vài tuần | Cần ít nhất 2–3 tháng, luôn so với dòng "giữ đều các mã cùng kỳ" |
 | Gõ lại con số vào Telegram | Gửi nguyên file `TG_FILE` |
+| Gửi Telegram lần nữa sau khi chạy tay một phiên cron đã xử lý | Chỉ gửi khi báo cáo có phiên mới |
 | Báo "Turtle canh" ít mã hẳn so với thường lệ (thường gần 80 mã) | Yahoo hoặc Binance lỗi giữa chừng: báo người dùng, chạy lại sau |
