@@ -42,7 +42,9 @@ Chạy thử bằng sổ lệnh giấy hai chiến lược đã backtest trên h
 - Cron trong WSL chạy `bash scripts/cron_scan.sh` vào phút thứ 7 mỗi giờ.
   - Script chỉ thật sự xử lý mỗi phiên Mỹ một lần, sau giờ đóng cửa, và gửi Telegram đúng một lần cho phiên đó.
   - WSL hoặc máy tắt thì lượt chạy kế tiếp tự bù các phiên bị lỡ.
-- Log: `~/.local/share/tho-san-swing/cron.log`.
+  - Quét lỗi 3 lần liền thì gửi một tin cảnh báo ⚠️; vẫn lỗi thì cứ 24 lần, khoảng mỗi ngày, nhắc lại.
+  - Tin Telegram gửi hỏng được giữ trong `tg_pending` và gửi lại ở lượt sau.
+- Log: `~/.local/share/tho-san-swing/cron.log`. Tự kiểm tra script cron (scan và hermes giả, không gửi gì): `bash scripts/test_cron_scan.sh`.
 - Xem lịch: `crontab -l`. Tắt: xoá dòng `tho-san-swing` bằng `crontab -e`.
 
 ## Lỗi thường gặp
