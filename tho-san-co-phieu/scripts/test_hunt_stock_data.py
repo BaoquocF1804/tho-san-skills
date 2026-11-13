@@ -398,3 +398,14 @@ def test_plan_tells_the_report_which_leverage_the_margin_assumes(monkeypatch, ca
     out = _plan(monkeypatch, capsys, "--stop", "95", "--target", "110", "--leverage", "3")
     size = next(line for line in out.splitlines() if line.startswith("TG: • Size:"))
     assert "Ký quỹ: " in size and "(x3)" in size
+
+
+def test_kronos_stays_out_of_plan_and_detail_unless_asked(monkeypatch, capsys):
+    # 13/11 walk-forward check: Kronos-small daily forecasts were biased and worse than a coin flip, so its lines
+    # must not reach a report by default. The kronos import is blocked here, so asking for it prints its error.
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    assert "Kronos" not in _plan(monkeypatch, capsys, "--stop", "95", "--target", "110")
+    assert "Kronos" in _plan(monkeypatch, capsys, "--stop", "95", "--target", "110", "--kronos")
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "detail", "TEST"])
+    h.main()
+    assert "Kronos" not in capsys.readouterr().out

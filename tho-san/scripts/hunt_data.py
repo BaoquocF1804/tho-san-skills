@@ -320,7 +320,7 @@ def detail(args) -> None:
             t = datetime.fromtimestamp(k[0] / 1000, timezone.utc).strftime("%m-%d %HZ")
             print(f"   4h {t} {g(float(k[1]))}/{g(float(k[2]))}/{g(float(k[3]))}/{g(float(k[4]))}"
                   f" taker-buy {buy:.0f}%{'  LIVE, not closed' if k is bars[-1] else ''}")
-        if not getattr(args, "no_kronos", False) and len(k1d_all) > 15:
+        if getattr(args, "kronos", False) and len(k1d_all) > 15:
             try:
                 from kronos import format_mc_detail, simulate_paths
                 mc = simulate_paths(
@@ -392,7 +392,7 @@ def plan(args) -> None:
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
     mc_tg_line = None
-    if not getattr(args, "no_kronos", False) and len(k1d) > 15:
+    if getattr(args, "kronos", False) and len(k1d) > 15:
         try:
             from kronos import evaluate_trade_paths, format_mc_plan, simulate_paths
             mc = simulate_paths(
@@ -485,7 +485,10 @@ def main() -> None:
     p.add_argument("symbols", nargs="+")
     p.add_argument("--horizon-days", type=int, default=10)
     p.add_argument("--mc-samples", type=int, default=30)
-    p.add_argument("--no-kronos", action="store_true")
+    # 13/11 walk-forward check: daily Kronos-small forecasts were biased toward the 120-day mean and worse
+    # than a coin flip, so they are opt-in and must never grade a setup
+    p.add_argument("--kronos", action="store_true", help="experimental Kronos-small MC lines (uncalibrated)")
+    p.add_argument("--no-kronos", action="store_true", help=argparse.SUPPRESS)  # the old opt-out, now a no-op
     p = sub.add_parser("plan")
     p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])
     p.add_argument("symbol")
@@ -500,7 +503,10 @@ def main() -> None:
     p.add_argument("--entry-band", type=float, default=0.005)
     p.add_argument("--horizon-days", type=int, default=10)
     p.add_argument("--mc-samples", type=int, default=30)
-    p.add_argument("--no-kronos", action="store_true")
+    # 13/11 walk-forward check: daily Kronos-small forecasts were biased toward the 120-day mean and worse
+    # than a coin flip, so they are opt-in and must never grade a setup
+    p.add_argument("--kronos", action="store_true", help="experimental Kronos-small MC lines (uncalibrated)")
+    p.add_argument("--no-kronos", action="store_true", help=argparse.SUPPRESS)  # the old opt-out, now a no-op
     p = sub.add_parser("stops")
     p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])
     p.add_argument("symbol")

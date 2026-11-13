@@ -1082,7 +1082,7 @@ def detail(args) -> None:
             print(f"   4h {t} {g(float(k[1]))}/{g(float(k[2]))}/{g(float(k[3]))}/{g(float(k[4]))}"
                   f" taker-buy {buy:.0f}%{'  LIVE, not closed' if k is bars[-1] else ''}")
         d_closed = weekday_bars(k1d_all[:-1])
-        if not getattr(args, "no_kronos", False) and len(d_closed) >= 15:
+        if getattr(args, "kronos", False) and len(d_closed) >= 15:
             try:
                 from kronos import format_mc_detail, simulate_paths
                 mc = simulate_paths(
@@ -1295,7 +1295,7 @@ def plan(args) -> None:
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
     mc_tg_line = None
     d_closed = weekday_bars(k1d[:-1])
-    if not getattr(args, "no_kronos", False) and len(d_closed) >= 15:
+    if getattr(args, "kronos", False) and len(d_closed) >= 15:
         try:
             from kronos import evaluate_trade_paths, format_mc_plan, simulate_paths
             mc = simulate_paths(
@@ -1438,7 +1438,10 @@ def main() -> None:
     p.add_argument("symbols", nargs="+")
     p.add_argument("--horizon-days", type=int, default=20)
     p.add_argument("--mc-samples", type=int, default=30)
-    p.add_argument("--no-kronos", action="store_true")
+    # 13/11 walk-forward check: daily Kronos-small forecasts were biased toward the 120-day mean and worse
+    # than a coin flip, so they are opt-in and must never grade a setup
+    p.add_argument("--kronos", action="store_true", help="experimental Kronos-small MC lines (uncalibrated)")
+    p.add_argument("--no-kronos", action="store_true", help=argparse.SUPPRESS)  # the old opt-out, now a no-op
     p = sub.add_parser("news")
     p.add_argument("symbols", nargs="*")
     p.add_argument("--limit", type=int, default=6)
@@ -1456,7 +1459,10 @@ def main() -> None:
     p.add_argument("--entry-band", type=float, default=0.005)
     p.add_argument("--horizon-days", type=int, default=20)
     p.add_argument("--mc-samples", type=int, default=30)
-    p.add_argument("--no-kronos", action="store_true")
+    # 13/11 walk-forward check: daily Kronos-small forecasts were biased toward the 120-day mean and worse
+    # than a coin flip, so they are opt-in and must never grade a setup
+    p.add_argument("--kronos", action="store_true", help="experimental Kronos-small MC lines (uncalibrated)")
+    p.add_argument("--no-kronos", action="store_true", help=argparse.SUPPRESS)  # the old opt-out, now a no-op
     p.add_argument("--log", action="store_true", help="save a PASS order to the ledger `orders` reads")
     p = sub.add_parser("stops")
     p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])

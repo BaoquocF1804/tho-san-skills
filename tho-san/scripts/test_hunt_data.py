@@ -278,3 +278,12 @@ def test_plan_tells_the_report_which_leverage_the_margin_assumes(monkeypatch, ca
     out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75",
                "--leverage", "2")
     assert "(x2)" in _line(out, "TG: • Size:")
+
+
+def test_kronos_stays_out_of_plan_and_detail_unless_asked(monkeypatch, capsys, tmp_path):
+    # 13/11 walk-forward check: Kronos-small daily forecasts were biased and worse than a coin flip.
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    args = ("plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75", "--leverage", "2")
+    assert "Kronos" not in _run(monkeypatch, capsys, *args)
+    assert "Kronos" in _run(monkeypatch, capsys, *args, "--kronos")
+    assert "Kronos" not in _run(monkeypatch, capsys, "detail", "COINUSDT")

@@ -48,14 +48,14 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
 3. **Soi kỹ 3–6 mã, trải ra nhiều ngành.**
    - Tối đa 3 mã cùng một ngành (cột `sector`).
    - Nếu dòng `Tradeable by sector` có mã ngoài bán dẫn/AI (Electronic Technology, Technology Services), phải soi ít nhất 1–2 mã ngoài nhóm đó, chọn mã có xu hướng hoặc chất xúc tác rõ nhất. Tin tức xoay quanh chip không phải lý do để chỉ soi chip.
-   - Lệnh: `hunt_stock_data.py detail SYM1 SYM2 ...` (mức giá theo ATR, vị thế nhỏ lẻ và top trader, định giá và tăng trưởng quy USD, bảng quý SEC nếu công ty nộp 10-Q, nến hôm nay, nến 4h, kèm dự báo xác suất **Kronos-small MC** 30 kịch bản qua 20 phiên T2–T6: dải phân vị `P10 / P50 / P90`, biên độ đỉnh/đáy P50 theo ATR và xác suất chạm TP/SL chuẩn `±1,5 ATR / ∓1,0 ATR`).
+   - Lệnh: `hunt_stock_data.py detail SYM1 SYM2 ...` (mức giá theo ATR, vị thế nhỏ lẻ và top trader, định giá và tăng trưởng quy USD, bảng quý SEC nếu công ty nộp 10-Q, nến hôm nay, nến 4h).
+   - Kronos-small MC đã **tắt mặc định** và **không được dùng để chấm hạng, hạ hạng hay bỏ lệnh**. Lần kiểm chứng ngày 13/11 so dự báo với kết quả thực tế: dự báo ngày bị kéo về giá trung bình 120 phiên (mã đang ở đỉnh như KO, AAPL, LLY đều bị dự báo giảm sâu), quá tự tin, và đoán chiều kém hơn tung đồng xu. `--kronos` chỉ để thử nghiệm; kết quả của nó không đưa vào báo cáo hay Telegram.
 4. **Dựng setup, chiều nào cũng được:** ưu tiên LONG cổ phiếu tăng trưởng doanh thu/EPS mạnh, hưởng lợi chu kỳ ngành của chính nó (bán dẫn/AI, phần mềm, y tế, tiêu dùng, tài chính, công nghiệp, năng lượng…) đang hồi về hỗ trợ/EMA; ưu tiên SHORT cổ phiếu suy giảm cơ bản, định giá quá cao, hoặc nhỏ lẻ fomo quá nóng khi gãy cấu trúc. Stop đặt ở mức luận điểm sai **và** vượt qua đỉnh/đáy swing gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
    - Dò stop bằng `hunt_stock_data.py stops LONG|SHORT SYM [--span 0.07] [--step 0.005]`, đừng viết script dò riêng. Lệnh này in, cho từng entry tính từ mark, mức stop chặt nhất mà `plan` cho qua. Mục tiêu 1,5R/2R đi kèm chỉ để tham chiếu. `WARN near` là đỉnh/đáy 20 phiên gần ngay sát stop.
 5. **Kiểm từng lệnh ngay trước khi báo:** `hunt_stock_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C] [--horizon-days N]`.
    - `FAIL` thì sửa mức hoặc bỏ lệnh.
    - Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark.
-   - `plan` tự chạy **Kronos-small MC** (30 đường giá Monte Carlo trên nến T2–T6) để chấm xác suất khớp Entry, `% chạm TP trước SL`, `% chạm SL trước TP` và kỳ vọng `E[R]`. Nếu in `⚠️ KRONOS PHẢN BIỆN` (xác suất chạm SL > chạm TP hoặc `E[R] < 0`), bắt buộc ghi rõ vào mục **Phản biện** và cân nhắc hạ hạng/bỏ lệnh.
-   - `PASS` thì `plan` in `Hạng tối đa` và 5 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý; Cơ bản & KQKD; Kronos MC P10/P50/P90 & % chạm TP trước SL). Báo cáo dán nguyên văn các dòng này (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu. Không gõ lại con số nào. Độ lệch mark–index và dòng KQKD cũng chép từ output.
+   - `PASS` thì `plan` in `Hạng tối đa` và 4 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý; Cơ bản & KQKD). Báo cáo dán nguyên văn các dòng này (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu. Không gõ lại con số nào. Độ lệch mark–index và dòng KQKD cũng chép từ output.
    - Lần `plan` cuối của mỗi lệnh đưa vào báo cáo phải thêm `--log`:
      - `LOG: #id`: lệnh mới.
      - `LOG: trùng #id`: lệnh cũ còn hiệu lực, báo cáo ghi "giữ #id".
@@ -69,8 +69,8 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
 2. Bối cảnh vĩ mô (Phố Wall và châu Á): tối đa 5 gạch đầu dòng, mỗi ý có ngày.
 3. Mỗi lệnh vào ngay:
    - Tiêu đề `### 🟢 LONG SYM [MKT] (R:R x) #id` hoặc `🔴 SHORT`.
-   - Các dòng `TG:` của `plan` (gồm cả dòng Kronos MC), nguyên văn, bỏ tiền tố; dòng KQKD từ `plan`.
-   - Rồi **Cơ bản & KQKD**, **Kỹ thuật & Vị thế**, **Phản biện**, **Sai nếu**. **Phản biện** chép lại lý do của `Hạng tối đa: B` hoặc `⚠️ KRONOS PHẢN BIỆN` nếu có.
+   - 4 dòng `TG:` của `plan`, nguyên văn, bỏ tiền tố; dòng KQKD từ `plan`.
+   - Rồi **Cơ bản & KQKD**, **Kỹ thuật & Vị thế**, **Phản biện**, **Sai nếu**. **Phản biện** chép lại lý do của `Hạng tối đa: B` nếu có.
 4. Lệnh chờ: trình bày như lệnh vào ngay (dòng `TG:` đầu đã ghi `Limit` hay `Stop`), hiệu lực 24 giờ. Lệnh cũ lấy từ `orders` (bước 6), mỗi lệnh một dòng gồm #id, trạng thái, và giữ / hủy / thay hoặc cách quản lý nếu đã khớp.
 5. Đã loại: mỗi mã một dòng kèm lý do (cơ bản, kỹ thuật, dính KQKD, hoặc cờ `ATR`/`PUMP`/`INDEX`).
 6. Quản lý rủi ro: tương quan với Nasdaq/S&P 500/KOSPI/Hang Seng; rủi ro gap khi mở phiên sàn cơ sở; điều kiện đóng sớm.
