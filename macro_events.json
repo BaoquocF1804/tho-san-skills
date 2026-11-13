@@ -1,0 +1,201 @@
+{
+ "_note": "US prints that move every market, read by tho-san and tho-san-co-phieu plan to cap pending orders at B. Times are New York local (the scripts handle DST). Sources read 2026-11-13: bls.gov/schedule/news_release/{cpi,ppi,empsit}.htm and federalreserve.gov/monetarypolicy/fomccalendars.htm (FOMC 2027 tentative; decision at 14:00 ET on the last meeting day). plan warns 30 days before the last row: add the next year then.",
+ "events": [
+  {
+   "name": "PPI",
+   "et": "2026-11-13 08:30"
+  },
+  {
+   "name": "NFP",
+   "et": "2026-12-04 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2026-12-09 14:00"
+  },
+  {
+   "name": "CPI",
+   "et": "2026-12-10 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2026-12-15 08:30"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-01-08 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-01-13 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-01-14 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2027-01-27 14:00"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-02-05 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-02-11 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-02-12 08:30"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-03-05 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-03-10 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-03-12 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2027-03-17 14:00"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-04-02 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-04-13 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-04-14 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2027-04-28 14:00"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-05-07 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-05-12 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-05-13 08:30"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-06-04 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2027-06-09 14:00"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-06-10 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-06-11 08:30"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-07-02 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-07-14 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-07-15 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2027-07-28 14:00"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-08-06 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-08-10 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-08-11 08:30"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-09-03 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-09-10 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-09-14 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2027-09-15 14:00"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-10-08 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-10-14 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-10-15 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2027-10-27 14:00"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-11-05 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-11-10 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-11-12 08:30"
+  },
+  {
+   "name": "FOMC",
+   "et": "2027-11-17 14:00"
+  },
+  {
+   "name": "NFP",
+   "et": "2027-12-03 08:30"
+  },
+  {
+   "name": "CPI",
+   "et": "2027-12-10 08:30"
+  },
+  {
+   "name": "PPI",
+   "et": "2027-12-15 08:30"
+  }
+ ]
+}

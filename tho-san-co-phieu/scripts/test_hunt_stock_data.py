@@ -6,6 +6,7 @@ Run: PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider ~/.gemin
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 import sys
 
@@ -199,3 +200,201 @@ def test_news_marks_empty_sections(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert out.count("=== NEWS:") >= 1
     assert out.count("(no results)") == out.count("=== NEWS:")
+
+
+# --- Grade ceiling: plan caps a setup at B on facts the report must not talk past ---
+
+@pytest.fixture(autouse=True)
+def _no_macro_events(monkeypatch):
+    """Keep the real calendar and clock out of tests that set no events of their own."""
+    monkeypatch.setattr(h, "load_macro_events", lambda: [], raising=False)
+
+
+def _first_tg(out: str) -> str:
+    return next(line for line in out.splitlines() if line.startswith("TG:"))
+
+
+def _grade(out: str) -> str:
+    return next(line for line in out.splitlines() if line.startswith("Hạng tối đa:"))
+
+
+def test_plan_caps_at_b_a_stop_hugging_a_recent_low_that_is_no_swing_point(monkeypatch, capsys):
+    # AVGO 13/11: the stop 314.5 sat 0.15 ATR over the 10/11 low 311.7, which lower lows next to it kept
+    # out of the swing check, so plan passed it and the report called it clean.
+    bars = _daily_bars(68)
+    bars[-6][3] = "94"  # Mon 5 Oct: a swing low, 1.3 under the stop (ATR ~4.4)
+    bars[-5][3] = "95"  # Tue 6 Oct: no swing point, 94 is next to it; 0.3 under the stop
+    _fake_exchange(monkeypatch, bars)
+    out = _plan(monkeypatch, capsys, "--stop", "95.3", "--target", "110")
+    assert "VERDICT: PASS" in out  # a warning, not a veto
+    assert "(near: 95)" in out
+    assert _grade(out).startswith("Hạng tối đa: B")
+    assert _first_tg(out).endswith("(tối đa hạng B)")
+
+
+def test_plan_caps_at_b_a_pending_order_whose_24h_window_spans_a_macro_print(monkeypatch, capsys):
+    # A buy limit under the market fills mostly when the print knocks the market down (AVGO 344.3 before PPI).
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    soon = datetime.now(timezone.utc) + timedelta(hours=3)
+    monkeypatch.setattr(h, "load_macro_events", lambda: [(soon, "PPI")], raising=False)
+    out = _plan(monkeypatch, capsys, "--entry", "99", "--stop", "94.8", "--target", "110")
+    assert "VERDICT: PASS" in out
+    assert _grade(out).startswith("Hạng tối đa: B") and "PPI" in _grade(out)
+    assert _first_tg(out).endswith("(tối đa hạng B)")
+
+
+def test_plan_shows_but_does_not_cap_a_market_order_before_a_macro_print(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    soon = datetime.now(timezone.utc) + timedelta(hours=3)
+    monkeypatch.setattr(h, "load_macro_events", lambda: [(soon, "CPI")], raising=False)
+    out = _plan(monkeypatch, capsys, "--stop", "95", "--target", "110")
+    assert _grade(out) == "Hạng tối đa: A"
+    assert any("CPI" in line for line in out.splitlines() if not line.startswith("TG:"))
+    assert _first_tg(out) == "TG: 🟢 LONG TESTUSDT [US] (TEST) — Vào ngay"
+
+
+def test_plan_caps_at_b_a_limit_more_than_1_atr_from_mark(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))  # ATR 4: a 95 limit is 1.25 ATR under the 100 mark
+    out = _plan(monkeypatch, capsys, "--entry", "95", "--stop", "90.5", "--target", "110")
+    assert "VERDICT: PASS" in out
+    assert _grade(out).startswith("Hạng tối đa: B") and "1.25 ATR" in _grade(out)
+
+
+# --- stops: the entry walk agents kept rewriting in scratchpads ---
+
+def _stops(monkeypatch, capsys, *argv: str) -> list[list[str]]:
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "stops", *argv])
+    h.main()
+    return [line.split() for line in capsys.readouterr().out.splitlines() if line.lstrip().startswith("entry")]
+
+
+def test_stops_walks_pullback_entries_to_the_tightest_passing_stop(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))  # ATR 4; the 98 lows are 2 under a 1-ATR stop, clear of it
+    rows = _stops(monkeypatch, capsys, "LONG", "TEST", "--span", "0.01")
+    assert [(r[1], r[4]) for r in rows] == [("100", "96"), ("99.5", "95.5"), ("99", "95")]
+    assert rows[0][-4:] == ["106", "|", "2R", "108"]  # 1.5R and 2R off the 4-wide risk
+
+
+def test_stops_steps_a_short_stop_past_a_swing_high_band(monkeypatch, capsys):
+    bars = _daily_bars(68)
+    bars[-6][2] = "104.5"  # Mon 5 Oct swing high: the 1-ATR short stop (~104.1) sits 0.4 under it
+    _fake_exchange(monkeypatch, bars)
+    rows = _stops(monkeypatch, capsys, "SHORT", "TEST", "--span", "0")
+    assert len(rows) == 1 and rows[0][1] == "100"
+    assert 105.53 < float(rows[0][4]) < 105.62  # first walk step beyond 104.5 + 0.25 ATR
+
+
+# --- order ledger: the 13/11 run never saw that both 12/11 limits had filled ---
+
+T0 = datetime(2026, 11, 12, 3, 30, tzinfo=timezone.utc)
+LIMIT_LONG = {"id": 1, "symbol": "AVGOUSDT", "side": "LONG", "order": "limit", "entry": 348.5, "stop": 330.3,
+              "target": 380.0, "created_at": T0.isoformat(), "expires_at": (T0 + timedelta(hours=24)).isoformat()}
+
+
+def _k(t: datetime, high: float, low: float) -> list:
+    return [int(t.timestamp() * 1000), "0", str(high), str(low), str((high + low) / 2)]
+
+
+def test_order_status_fills_a_buy_limit_then_reports_the_target():
+    k5m = [_k(T0 + timedelta(minutes=5 * i), 352, 349) for i in range(18)]  # 03:30-04:55 UTC above 348.5
+    k5m.append(_k(T0 + timedelta(minutes=90), 350, 348.0))  # 05:00 UTC = 12:00 ICT: filled
+    k1h = [_k(T0 + timedelta(minutes=90), 352, 348), _k(T0 + timedelta(minutes=330), 381, 360)]  # 09:00 UTC: 381
+    status = h.order_status(LIMIT_LONG, k5m, k1h, mark=370, now=T0 + timedelta(hours=8))
+    assert status == "KHỚP 12/11 12:00 ICT · chạm TP 12/11 16:00 ICT (+1.73R)"
+
+
+@pytest.mark.parametrize("hours_later, want", [(2, "CHỜ · còn 22h"), (25, "HẾT HẠN · không khớp")])
+def test_order_status_keeps_an_untouched_limit_pending_until_it_expires(hours_later, want):
+    k5m = [_k(T0 + timedelta(minutes=5 * i), 360, 349) for i in range(288)]
+    assert h.order_status(LIMIT_LONG, k5m, [], mark=355, now=T0 + timedelta(hours=hours_later)) == want
+
+
+def test_order_status_counts_the_stop_when_one_bar_spans_stop_and_target():
+    k5m = [_k(T0, 350, 348.0)]
+    k1h = [_k(T0, 350, 348), _k(T0 + timedelta(hours=3), 381, 330)]
+    status = h.order_status(LIMIT_LONG, k5m, k1h, mark=340, now=T0 + timedelta(hours=5))
+    assert status == "KHỚP 12/11 10:30 ICT · chạm stop 12/11 13:30 ICT (-1.00R)"
+
+
+def test_order_status_marks_a_filled_order_still_running_in_r():
+    k5m = [_k(T0, 350, 348.0)]
+    status = h.order_status(LIMIT_LONG, k5m, [_k(T0, 352, 348)], mark=366.7, now=T0 + timedelta(hours=5))
+    assert status == "KHỚP 12/11 10:30 ICT · đang chạy +1.00R (mark 366.7)"
+
+
+def test_plan_log_saves_a_passing_order_once(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    monkeypatch.setattr(h, "ORDERS", tmp_path / "orders.json", raising=False)
+    first = _plan(monkeypatch, capsys, "--entry", "99", "--stop", "94.8", "--target", "110", "--log")
+    again = _plan(monkeypatch, capsys, "--entry", "99", "--stop", "94.8", "--target", "110", "--log")
+    failed = _plan(monkeypatch, capsys, "--entry", "102.5", "--stop", "97.5", "--target", "120", "--log")
+    saved = json.loads((tmp_path / "orders.json").read_text())
+    assert [(o["id"], o["entry"], o["stop"], o["order"]) for o in saved] == [(1, 99.0, 94.8, "limit")]
+    assert "LOG: #1" in first and "LOG: trùng #1" in again and "LOG:" not in failed
+
+
+def test_orders_cancel_refuses_an_order_that_already_filled(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, _daily_bars(68))  # every fake candle trades 98-102, so a 99 limit fills at once
+    path = tmp_path / "orders.json"
+    created = MONDAY.isoformat()
+    path.write_text(json.dumps([{"id": 1, "symbol": "TESTUSDT", "side": "LONG", "order": "limit", "entry": 99.0,
+                                 "stop": 94.8, "target": 110.0, "created_at": created,
+                                 "expires_at": (MONDAY + timedelta(hours=24)).isoformat()}]))
+    monkeypatch.setattr(h, "ORDERS", path, raising=False)
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "orders", "--cancel", "1"])
+    with pytest.raises(SystemExit, match="đã khớp"):
+        h.main()
+    assert "canceled_at" not in json.loads(path.read_text())[0]
+
+
+@pytest.fixture(autouse=True)
+def _no_kronos(monkeypatch):
+    """Offline checks never load the Kronos model: plan/detail fall back to their no-MC path."""
+    monkeypatch.setitem(sys.modules, "kronos", None)
+
+
+# --- Universe and flags: 13/11 the top-40 cut left 29 of 40 names in tech and dropped 81 liquid others ---
+
+def _tickers(n_liquid: int) -> tuple[dict, dict, dict]:
+    meta = {f"S{i:02d}USDT": {"base_asset": f"S{i:02d}", "underlying_type": "EQUITY"} for i in range(n_liquid + 3)}
+    tickers = {s: {"quoteVolume": str(90_000_000 - i * 1_000_000)} for i, s in enumerate(meta)}
+    for s in list(meta)[n_liquid:n_liquid + 2]:
+        tickers[s]["quoteVolume"] = "1500000"  # under the 2M liquidity floor
+    etf = list(meta)[-1]
+    tv = {etf.removesuffix("USDT"): {"is_etf": True}}
+    return meta, tickers, tv
+
+
+def test_universe_takes_every_liquid_contract_unless_capped():
+    meta, tickers, tv = _tickers(45)
+    every = h.select_universe(meta, tickers, tv, min_qv=2_000_000, top=0, market="ALL", include_etfs=False)
+    assert len(every) == 45 and every[0] == "S00USDT"  # liquidity order, ETF and the two thin ones left out
+    assert h.select_universe(meta, tickers, tv, min_qv=2_000_000, top=10, market="ALL", include_etfs=False) == every[:10]
+
+
+@pytest.mark.parametrize("base", ["UVXY", "STXX"])
+def test_universe_drops_non_stocks_tradingview_cannot_name(base):
+    # 13/11 the wider scan let UVXY (a VIX ETP) and STXX (31.7x the stock of that ticker) in as stocks.
+    meta = {f"{base}USDT": {"base_asset": base, "underlying_type": "EQUITY"}}
+    tickers = {f"{base}USDT": {"quoteVolume": "90000000"}}
+    assert h.select_universe(meta, tickers, {}, min_qv=1_000_000, top=0, market="ALL", include_etfs=False) == []
+
+
+@pytest.mark.parametrize("atr_pct, chg24, want", [
+    (4.0, 1.0, "OK"),  # x5 stop window 1-2.19 ATR
+    (8.15, 1.0, "OKx4"),  # AMD 12/11: under the 8.75% x5 cap but a 0.07-ATR window; x4 gives 1.38 ATR of room
+    (12.0, 1.0, "OKx3"),
+    (18.0, 1.0, "OKx2"),
+    (25.0, 1.0, "ATR"),  # too wide even at x2 (23.75% cap)
+    (4.0, 25.0, "PUMP"),  # a 25% day still comes first
+])
+def test_flag_suggests_the_highest_leverage_that_leaves_room_for_a_stop(atr_pct, chg24, want):
+    row = {"mmr": 0.025, "atr_pct": atr_pct, "chg24h": chg24, "fund": 0.0001, "mark_index_dev_pct": 0.01}
+    assert h._tag_row(row, 5)["flag"] == want
+
+
+def test_plan_tells_the_report_which_leverage_the_margin_assumes(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    out = _plan(monkeypatch, capsys, "--stop", "95", "--target", "110", "--leverage", "3")
+    size = next(line for line in out.splitlines() if line.startswith("TG: • Size:"))
+    assert "Ký quỹ: " in size and "(x3)" in size

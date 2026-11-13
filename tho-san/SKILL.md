@@ -16,10 +16,11 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
 | Vốn | 1000 USDT (`--capital`) |
 | Rủi ro mỗi lệnh | 1% vốn |
 | Ký quỹ tối đa mỗi lệnh | 20% vốn |
-| Stop | ≥ 1 ATR14 ngày, ≤ `(1/đòn bẩy − mmr)/2` (8,75% ở x5) và cách mọi đỉnh/đáy ngày ≥ 0,25 ATR (`plan` tự kiểm) |
+| Stop | ≥ 1 ATR14 ngày, ≤ `(1/đòn bẩy − mmr)/2` (8,75% ở x5) và cách mọi đỉnh/đáy ngày ≥ 0,25 ATR (`plan` tự kiểm: sát swing 120 ngày hoặc đỉnh/đáy 2 ngày gần nhất thì `FAIL`; sát đỉnh/đáy bất kỳ trong 20 ngày thì `WARN` và hạ trần hạng) |
 | R:R gộp | ≥ 1,5 (script kèm thêm `net R:R` sau phí taker 2 chiều 0,10%) |
 | Vào ngay | entry trong ±0,5% giá mark; xa hơn là lệnh chờ (`limit` nếu chờ hồi, `stop` nếu đánh phá vỡ) |
 | Tầm nhìn | ≤ 20 ngày, tối đa 3 lệnh |
+| Hạng | `plan` in `Hạng tối đa`. Là B khi stop dính `WARN`, khi lệnh chờ có 24 giờ hiệu lực trùm một sự kiện vĩ mô Mỹ (CPI, PPI, việc làm, FOMC; lịch nằm ở `macro_events.json`, gốc repo skills), hoặc khi entry chờ cách mark hơn 1 ATR. Báo cáo được hạ hạng, **không được nâng** |
 
 ## Quy trình
 1. **Dữ liệu:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py scan` (khoảng 15 giây, 40 hợp đồng lớn nhất). Chỉ săn mã có flag `OK`; `ATR` là quá biến động cho đòn bẩy hoặc mã mới niêm yết chưa đủ 15 nến ngày, `PUMP` là vừa pump/funding cực đoan.
@@ -31,9 +32,10 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
      - dòng tiền ETF BTC/ETH ngày gần nhất, bản đồ thanh lý BTC/ETH (cụm long/short; với altcoin không có bài heatmap trong ngày thì dùng vùng swing high/low kết hợp OI để ước lượng vùng quét stop)
      - lịch sự kiện 2 tuần tới: mở khóa token, nâng cấp, FOMC
      - tin riêng từng mã trong shortlist (OI kỷ lục, hack, unlock, ETF)
-3. **Soi kỹ 3–6 mã:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py detail SYM1 SYM2 ...` (mức hỗ trợ/kháng cự đã gom cụm 0,25 ATR và tính cả S/R flip, vị thế nhỏ lẻ và top trader, nến hôm nay, nến 4h).
+3. **Soi kỹ 3–6 mã:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py detail SYM1 SYM2 ...` (mức hỗ trợ/kháng cự đã gom cụm 0,25 ATR và tính cả S/R flip, vị thế nhỏ lẻ và top trader, nến hôm nay, nến 4h, kèm dự báo xác suất **Kronos-small MC** 30 kịch bản trong 10 ngày: dải phân vị `P10 / P50 / P90`, biên độ đỉnh/đáy P50 theo ATR và xác suất chạm TP/SL chuẩn `±1,5 ATR / ∓1,0 ATR`).
 4. **Dựng setup, chiều nào cũng được:** hồi về hỗ trợ trong xu hướng; phá vỡ hoặc thủng mức có OI và taker xác nhận; đảo chiều khi đòn bẩy quá nóng (OI tăng mạnh, funding cao, nhỏ lẻ dồn một phía, top trader phía kia); catalyst có ngày. Stop đặt ở mức luận điểm sai **và** vượt qua cụm thanh lý / đỉnh đáy quét stop gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
-5. **Kiểm từng lệnh ngay trước khi báo:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C]`. `FAIL` thì sửa mức hoặc bỏ lệnh; entry xa mark là lệnh chờ (`limit` hoặc `stop` theo output của script). Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark. `PASS` thì `plan` in sẵn 3 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý) và dòng `DESK:`: báo cáo dán nguyên văn các dòng `TG:` (bỏ tiền tố `TG: `), desk chạy đúng dòng `DESK:`. Không gõ lại con số nào.
+   - Dò stop bằng `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py stops LONG|SHORT SYM [--span 0.07] [--step 0.005]`, đừng viết script dò riêng. Lệnh này in, cho từng entry tính từ mark, mức stop chặt nhất mà `plan` cho qua. Mục tiêu 1,5R/2R đi kèm chỉ để tham chiếu. `WARN near` là đỉnh/đáy 20 ngày gần ngay sát stop.
+5. **Kiểm từng lệnh ngay trước khi báo:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C]`. `FAIL` thì sửa mức hoặc bỏ lệnh; entry xa mark là lệnh chờ (`limit` hoặc `stop` theo output của script). Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark. `plan` tự chạy **Kronos-small MC** (30 đường giá Monte Carlo) để chấm xác suất khớp Entry, `% chạm TP trước SL`, `% chạm SL trước TP` và kỳ vọng `E[R]`. Nếu in `⚠️ KRONOS PHẢN BIỆN` (xác suất chạm SL > chạm TP hoặc `E[R] < 0`), bắt buộc ghi rõ vào mục **Phản biện** và cân nhắc hạ hạng/bỏ lệnh. `PASS` thì `plan` in `Hạng tối đa`, sẵn 4 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý; Kronos MC P10/P50/P90 & % chạm TP trước SL) và dòng `DESK:`. Báo cáo dán nguyên văn các dòng `TG:` (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu; desk chạy đúng dòng `DESK:`. Không gõ lại con số nào.
 6. **Ghi desk trước khi viết báo cáo** (máy có `~/crypto-desk-rewrite`; người dùng nói "không ghi" thì bỏ bước này). `desk` dưới đây là `~/crypto-desk-rewrite/scripts/desk`.
    - Lệnh cũ lấy từ desk, không từ `/tmp` (WSL khởi động lại là mất): `desk --json calls --status LOGGED`, giữ các dòng `segment` `tho-san` có `outcome` null (desk để `LOGGED` cả lệnh đã chấm). Chia theo `filled_at`:
      - có giờ: **đang chạy** (limit đã khớp, hoặc lệnh vào ngay), kể cả khi `expires_at` đã qua. Không hủy; quyết định giữ hay đóng sớm ở mức nào, và tính là vị thế đang mở ở mục Quản lý rủi ro.
@@ -48,9 +50,12 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
    - Kết quả xem bằng `desk scorecard`, dòng `tho-san`.
 
 ## Báo cáo (tiếng Việt, đúng thứ tự)
-1. Một dòng kết luận: có hay không có lệnh hạng A, bao nhiêu lệnh.
+1. Một dòng kết luận: có hay không có lệnh hạng A, bao nhiêu lệnh. Hạng của mỗi lệnh không vượt `Hạng tối đa` mà `plan` in ra.
 2. Bối cảnh: tối đa 5 gạch đầu dòng, mỗi ý có ngày.
-3. Mỗi lệnh vào ngay: tiêu đề là `### ` + dòng `TG:` đầu của `plan` (bỏ tiền tố) + ` #id`, ví dụ `### 🔴 SHORT BTCUSDT — Vào ngay #id`; ngay dưới là 2 dòng `TG:` còn lại, nguyên văn, bỏ tiền tố (R:R nằm trong dòng Vào); rồi **Lý do**, **Phản biện**, **Sai nếu**.
+3. Mỗi lệnh vào ngay:
+   - Tiêu đề là `### ` + dòng `TG:` đầu của `plan` (bỏ tiền tố) + ` #id`, ví dụ `### 🔴 SHORT BTCUSDT — Vào ngay #id`.
+   - Ngay dưới là các dòng `TG:` còn lại (Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý; Kronos MC), nguyên văn, bỏ tiền tố.
+   - Rồi **Lý do**, **Phản biện**, **Sai nếu**. **Phản biện** chép lại lý do của `Hạng tối đa: B` hoặc `⚠️ KRONOS PHẢN BIỆN` nếu có.
 4. Lệnh chờ: như lệnh vào ngay (dòng `TG:` đầu đã ghi `Limit` hay `Stop`), hiệu lực 24 giờ. Lệnh cũ từ desk (bước 6), mỗi lệnh một dòng: lệnh chờ chưa khớp thì giữ #id, hủy #id, hoặc thay #id bằng #id mới; lệnh đang chạy thì #id, mã, chiều, entry, khớp lúc (`filled_at`), giữ hay đóng sớm ở mức nào.
 5. Đã loại: mỗi mã một dòng kèm lý do.
 6. Quản lý rủi ro: lệnh cùng chiều là tương quan; sự kiện sắp tới; điều kiện đóng sớm (mức BTC).
@@ -58,8 +63,8 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
 8. Một dòng: phân tích tham khảo, không phải lời khuyên đầu tư.
 
 ## Gửi Telegram (mỗi lần săn — bản rút gọn 1 tin nhắn)
-- Bản đầy đủ lưu vào `/tmp/tho-san/report-<YYYYmmdd-HHMM>.md` và hiển thị trong khung chat.
-- Bản gửi Telegram lưu riêng vào `/tmp/tho-san/tg-<YYYYmmdd-HHMM>.md` (**tối đa ~2500 ký tự, gọn trong 1 tin nhắn duy nhất (Telegram cắt ở 4096), không dùng bảng Markdown, không kèm danh sách link URL và danh sách mã đã loại**):
+- Bản đầy đủ lưu vào `~/.local/share/tho-san/report-<YYYYmmdd-HHMM>.md` và hiển thị trong khung chat. Không lưu ở `/tmp`, vì WSL khởi động lại là mất.
+- Bản gửi Telegram lưu riêng vào `~/.local/share/tho-san/tg-<YYYYmmdd-HHMM>.md` (**tối đa ~2500 ký tự, gọn trong 1 tin nhắn duy nhất (Telegram cắt ở 4096), không dùng bảng Markdown, không kèm danh sách link URL và danh sách mã đã loại**):
   - **Dòng đầu:** Kết luận ngắn (số lệnh vào ngay / lệnh chờ).
   - **Bối cảnh:** tối đa 3 gạch đầu dòng, mỗi dòng 1 câu ngắn kèm ngày.
   - **Mỗi lệnh (vào ngay hoặc chờ):**
@@ -68,8 +73,8 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
     - `• Sai nếu: <mức đóng sớm / hủy lệnh>`
   - **Lệnh cũ** (từ desk, bước 6): mỗi lệnh 1 dòng; lệnh chờ: giữ / hủy / thay kèm #id; lệnh đang chạy: #id đã khớp, giữ hay đóng sớm ở mức nào.
   - **Quản trị rủi ro:** 1–2 dòng (tối đa mấy lệnh cùng lúc, mốc BTC đóng sớm, giờ sự kiện lớn).
-- Kiểm `wc -m /tmp/tho-san/tg-<...>.md` ≤ 2500 rồi gửi bằng lệnh:
-  `hermes send --to telegram --subject "🎯 Thợ săn <dd/mm HH:MM>" --file /tmp/tho-san/tg-<...>.md`
+- Kiểm `wc -m ~/.local/share/tho-san/tg-<...>.md` ≤ 2500 rồi gửi bằng lệnh:
+  `hermes send --to telegram --subject "🎯 Thợ săn <dd/mm HH:MM>" --file ~/.local/share/tho-san/tg-<...>.md`
 - Exit khác 0 thì báo người dùng kèm lỗi, không thử lại liên tục. Người dùng nói "không gửi" thì bỏ bước này.
 
 ## Lỗi thường gặp
@@ -79,6 +84,9 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
 | Gọi Exa song song, bị `RATE_LIMITED` | Tuần tự, cách khoảng 15 giây; bị chặn thì đợi `retry_after_seconds` rồi thử lại, tối đa 3 lần |
 | Stop vừa đủ 1 ATR, giá chạy làm còn 0,99 ATR | Chạy lại `plan` với giá mới ngay trước khi báo |
 | Stop nằm sát đỉnh/đáy ngày hoặc ngay dưới cụm thanh lý (`plan` FAIL `stop >= 0.25 ATR from daily highs/lows`) | Dời stop qua hẳn mọi mức trong `too close` và cụm thanh lý; R:R không còn đủ thì bỏ lệnh, không ép stop sát lại |
+| Gọi "stop sạch" khi `plan` in `WARN … (near: …)` (BTC 13/11: stop 77.450 nằm giữa đỉnh/đáy ngày 77.060–77.868 của vùng 30/10–03/11) | `WARN` không chặn lệnh nhưng hạ trần xuống B. Dời stop qua mức đó nếu R:R còn đủ, không thì để hạng B |
+| Gọi lệnh là hạng A trong khi dòng `TG:` đầu ghi `(tối đa hạng B)` (lệnh chờ trùm PPI/CPI/FOMC, hoặc cách mark hơn 1 ATR) | Hạng ≤ `Hạng tối đa`; chép lý do vào **Phản biện** |
+| Viết lại script dò stop/entry trong scratchpad mỗi lần săn | `hunt_data.py stops` |
 | Nói "gãy", "thủng", "bị từ chối" khi mark chỉ tạm vượt mức, hoặc đọc nến 4h `LIVE` như nến đã đóng | Chỉ tính trên nến ngày/4h đã đóng; nến `LIVE` là nến đang chạy |
 | Coi funding 0,0100% là long quá nóng; gọi `avg last 21` là trung bình 30 ngày | 0,01%/8h là mức mặc định của Binance (trung tính); `avg last 21` là 21 kỳ, tức 7 ngày với kỳ 8h |
 | Mục bản đồ thanh lý chỉ ghi số tiền đã bị thanh lý | Ghi mức giá các cụm long/short đang chờ, rồi đặt stop vượt các cụm đó |

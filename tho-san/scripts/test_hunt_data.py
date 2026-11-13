@@ -181,3 +181,100 @@ def test_detail_marks_only_the_forming_4h_bar_live(monkeypatch, capsys, tmp_path
     assert len(bars) == 7
     assert "LIVE" in bars[-1]
     assert not any("LIVE" in bar for bar in bars[:-1])
+
+
+# --- Grade ceiling: plan caps a setup at B on facts the report must not talk past ---
+
+@pytest.fixture(autouse=True)
+def _no_macro_events(monkeypatch):
+    """Keep the real calendar and clock out of tests that set no events of their own."""
+    monkeypatch.setattr(hd, "load_macro_events", lambda: [], raising=False)
+
+
+def _line(out: str, prefix: str) -> str:
+    return next(line for line in out.splitlines() if line.startswith(prefix))
+
+
+def _with_bars(monkeypatch, bars: list) -> None:
+    base_get = hd.get
+    monkeypatch.setattr(hd, "get", lambda path, **params: bars[-params["limit"]:] if path == "/fapi/v1/klines"
+                        else base_get(path, **params))
+
+
+def test_plan_caps_at_b_a_stop_hugging_a_recent_low_that_is_no_swing_point(monkeypatch, capsys, tmp_path):
+    # A daily low beside a lower one is no swing point, so plan's veto missed it (AVGO 13/11, 311.7).
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    bars = _bars(60)
+    bars[-8][3] = "76"  # a swing low a week back, 8.5 under the stop
+    bars[-7][3] = "84"  # the next day: no swing point, 0.5 under the stop
+    _with_bars(monkeypatch, bars)
+    out = _run(monkeypatch, capsys, "plan", "LONG", "COINUSDT", "--stop", "84.5", "--target", "140",
+               "--leverage", "2")
+    assert "VERDICT: PASS" in out
+    assert "(near: 84)" in out
+    assert _line(out, "Hạng tối đa:").startswith("Hạng tối đa: B")
+    assert _line(out, "TG:") == "TG: 🟢 LONG COINUSDT — Vào ngay (tối đa hạng B)"
+
+
+def test_plan_caps_at_b_a_pending_order_whose_24h_window_spans_a_macro_print(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    soon = datetime.now(timezone.utc) + timedelta(hours=3)
+    monkeypatch.setattr(hd, "load_macro_events", lambda: [(soon, "PPI")], raising=False)
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--entry", "102", "--stop", "114",
+               "--target", "75", "--leverage", "2")
+    grade = _line(out, "Hạng tối đa:")
+    assert grade.startswith("Hạng tối đa: B") and "PPI" in grade
+    assert _line(out, "TG:") == "TG: 🔴 SHORT COINUSDT — Limit (tối đa hạng B)"
+
+
+def test_plan_shows_but_does_not_cap_a_market_order_before_a_macro_print(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    soon = datetime.now(timezone.utc) + timedelta(hours=3)
+    monkeypatch.setattr(hd, "load_macro_events", lambda: [(soon, "FOMC")], raising=False)
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75",
+               "--leverage", "2")
+    assert _line(out, "Hạng tối đa:") == "Hạng tối đa: A"
+    assert "FOMC" in _line(out, "Sự kiện vĩ mô")
+    assert _line(out, "TG:") == "TG: 🔴 SHORT COINUSDT — Vào ngay"
+
+
+def test_plan_caps_at_b_a_limit_more_than_1_atr_from_mark(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})  # ATR ~10: a 112 sell limit is ~1.2 ATR over 100
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--entry", "112", "--stop", "123",
+               "--target", "80", "--leverage", "2")
+    assert "VERDICT: PASS" in out
+    grade = _line(out, "Hạng tối đa:")
+    assert grade.startswith("Hạng tối đa: B") and "entry cách mark" in grade
+
+
+# --- stops: the entry walk agents kept rewriting in scratchpads ---
+
+def _stop_rows(out: str) -> list[list[str]]:
+    return [line.split() for line in out.splitlines() if line.lstrip().startswith("entry")]
+
+
+def test_stops_walks_pullback_entries_at_one_atr_when_nothing_is_in_the_way(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})  # 96 lows sit ~6 above a 1-ATR long stop
+    rows = _stop_rows(_run(monkeypatch, capsys, "stops", "LONG", "COINUSDT", "--span", "0.01", "--leverage", "2"))
+    assert [r[1] for r in rows] == ["100", "99.5", "99"]
+    assert all(r[6] == "1.00" for r in rows)  # "(-x%, 1.00 ATR)": no level forced a wider stop
+
+
+def test_stops_steps_a_short_stop_past_the_swing_high_band(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})  # a 1-ATR short stop lands on the 110 swing highs
+    rows = _stop_rows(_run(monkeypatch, capsys, "stops", "SHORT", "COINUSDT", "--span", "0", "--leverage", "2"))
+    assert len(rows) == 1 and rows[0][1] == "100"
+    assert 112.3 < float(rows[0][4]) < 112.8  # just past 110 + 0.25 ATR
+
+
+@pytest.fixture(autouse=True)
+def _no_kronos(monkeypatch):
+    """Offline checks never load the Kronos model: plan/detail fall back to their no-MC path."""
+    monkeypatch.setitem(sys.modules, "kronos", None)
+
+
+def test_plan_tells_the_report_which_leverage_the_margin_assumes(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75",
+               "--leverage", "2")
+    assert "(x2)" in _line(out, "TG: • Size:")

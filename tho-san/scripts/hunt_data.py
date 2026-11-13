@@ -2,12 +2,16 @@
 """Binance USDⓈ-M public market data for a manual futures hunt (stdlib only, no API keys).
 
   python3 hunt_data.py scan [--top 40] [--leverage 5] [--workers 6]
-      universe table (top perpetuals by volume) + /tmp/tho-san/market.json
+      universe table (top perpetuals by volume) + ~/.local/share/tho-san/market.json
   python3 hunt_data.py detail SYMBOL [SYMBOL ...]
       levels in ATRs, positioning, last daily candles, today's candle, recent 4h bars
   python3 hunt_data.py plan LONG|SHORT SYMBOL --stop X --target Y [--entry E] [--capital 1000]
       checks the risk rules against a fresh mark and ATR, then sizes the position; on PASS prints the TG: lines
-      the report pastes and the DESK: log-call line, so no level is retyped
+      the report pastes and the DESK: log-call line, so no level is retyped; a WARN (stop within 0.25 ATR of a
+      daily high/low of the last 20 days), a pending order spanning a US macro print (macro_events.json at the
+      skills repo root) or a pending entry over 1 ATR from mark caps `Hạng tối đa` at B
+  python3 hunt_data.py stops LONG|SHORT SYMBOL [--span 0.07] [--step 0.005] [--leverage 5]
+      walks entries away from the mark and prints the tightest stop plan would pass, with 1.5R/2R targets
 
 Indicators are textbook: EMA seeded with an SMA, Wilder RSI/ATR on closed candles, swing
 points with two bars on each side over all 259 closed days plus the fresh 20/55-day extremes
@@ -24,12 +28,16 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 BASE = "https://fapi.binance.com"
-OUT = Path("/tmp/tho-san/market.json")
+OUT = Path.home() / ".local/share/tho-san/market.json"  # /tmp is emptied on every WSL restart
+MACRO_EVENTS = Path(__file__).resolve().parents[2] / "macro_events.json"  # repo root, shared with tho-san-co-phieu
+RECENT_DAYS = 20  # every daily high/low this recent is a watched level, swing point or not
+ICT = timezone(timedelta(hours=7))
 # USD stablecoins, plus tokenized gold (gold's hours and ATR). Binance tags gold RWA like the real
 # tokens MANTRA and CFG, so it is excluded by name.
 EXCLUDED_BASES = {"USDC", "FDUSD", "TUSD", "USDP", "DAI", "BUSD", "USDE", "RLUSD", "USD1", "PAXG", "XAUT"}
@@ -109,6 +117,41 @@ def pctile(series, value):
 def max_stop_fraction(leverage: int, mmr: float) -> float:
     """Half the distance to an isolated-margin liquidation, so a stop always fires first."""
     return (1 / leverage - mmr) / 2
+
+
+def stop_levels(k1d: list) -> tuple[float | None, list[float], list[float]]:
+    """ATR14 on closed days and the levels a stop is measured against.
+
+    veto: 120-day swing points plus every high/low of the last two closed days and today (swings() needs two
+    later bars to confirm a point); a stop this close fails. watch: every daily high/low of the last
+    RECENT_DAYS days and today; a stop this close sits where the next sweep lands, so it caps the grade.
+    """
+    def extremes(bars: list) -> list[float]:
+        return [float(k[i]) for k in bars for i in (2, 3)]
+
+    h, lo, c = ([float(k[i]) for k in k1d[:-1]] for i in (2, 3, 4))
+    sh, sl = swings(h, lo)
+    return (atr(h, lo, c), sorted(set(sh + sl + extremes(k1d[-3:]))),
+            sorted(set(extremes(k1d[-(RECENT_DAYS + 1):]))))
+
+
+def within(levels: list[float], price: float, band: float) -> list[float]:
+    return [x for x in levels if abs(x - price) < band]
+
+
+def load_macro_events() -> list[tuple[datetime, str]]:
+    """US prints that move every market (CPI, PPI, jobs report, FOMC), from the table shared with stocks."""
+    try:
+        rows = json.loads(MACRO_EVENTS.read_text())["events"]
+    except (OSError, ValueError, KeyError):
+        return []
+    ny = ZoneInfo("America/New_York")
+    return sorted((datetime.fromisoformat(r["et"]).replace(tzinfo=ny).astimezone(timezone.utc), r["name"])
+                  for r in rows)
+
+
+def ict(t: datetime) -> str:
+    return t.astimezone(ICT).strftime("%d/%m %H:%M") + " ICT"
 
 
 def symbol_meta(info) -> dict[str, dict]:
@@ -268,7 +311,8 @@ def detail(args) -> None:
         print(f"  tick {r['tick']} step {r['step']} min_notional {r['min_notional']} mmr {r['mmr']:.4f}")
         print("  last closed days (date o/h/l/c):", " ".join(
             f"{k[0]} {g(k[1])}/{g(k[2])}/{g(k[3])}/{g(k[4])}" for k in r["last5_daily"]))
-        today = get("/fapi/v1/klines", symbol=sym, interval="1d", limit=1)[0]
+        k1d_all = get("/fapi/v1/klines", symbol=sym, interval="1d", limit=130)
+        today = k1d_all[-1]
         print(f"  today so far o {g(float(today[1]))} h {g(float(today[2]))} l {g(float(today[3]))}")
         bars = get("/fapi/v1/klines", symbol=sym, interval="4h", limit=7)
         for k in bars:
@@ -276,6 +320,17 @@ def detail(args) -> None:
             t = datetime.fromtimestamp(k[0] / 1000, timezone.utc).strftime("%m-%d %HZ")
             print(f"   4h {t} {g(float(k[1]))}/{g(float(k[2]))}/{g(float(k[3]))}/{g(float(k[4]))}"
                   f" taker-buy {buy:.0f}%{'  LIVE, not closed' if k is bars[-1] else ''}")
+        if not getattr(args, "no_kronos", False) and len(k1d_all) > 15:
+            try:
+                from kronos import format_mc_detail, simulate_paths
+                mc = simulate_paths(
+                    k1d_all[:-1], mark=m, symbol=sym,
+                    pred_len=args.horizon_days, sample_count=args.mc_samples, interval="1d",
+                )
+                for line in format_mc_detail(mc, a):
+                    print(line)
+            except Exception as exc:
+                print(f"  Kronos-small MC error: {exc}")
 
 
 def plan(args) -> None:
@@ -286,8 +341,7 @@ def plan(args) -> None:
                          " (stablecoins and gold are left out)")
     mark = float(get("/fapi/v1/premiumIndex", symbol=sym)["markPrice"])
     k1d = get("/fapi/v1/klines", symbol=sym, interval="1d", limit=260)
-    h, lo, c = ([float(k[i]) for k in k1d[:-1]] for i in (2, 3, 4))  # closed days: same ATR as scan/detail
-    a = atr(h, lo, c)
+    a, veto, watch = stop_levels(k1d)  # closed days: same ATR as scan/detail
     if a is None:
         raise SystemExit(f"{sym}: fewer than 15 closed daily candles, so no ATR14 yet — skip this contract")
     entry, note = args.entry or mark, ""
@@ -309,10 +363,9 @@ def plan(args) -> None:
         raise SystemExit(f"{side}: stop and target are on the wrong side of entry {entry}")
     fee_unit = entry * TAKER_FEE_ROUNDTRIP
     net_rr = (reward_unit - fee_unit) / (risk_unit + fee_unit)
-    sh, sl = swings(h, lo)
-    # swings() needs two later bars to confirm a point, so the last two closed days and today go in as they are
-    near = sorted({x for x in sh + sl + [float(k[i]) for k in k1d[-3:] for i in (2, 3)]
-                   if abs(x - args.stop) < STOP_CLEARANCE_ATR * a})
+    band = STOP_CLEARANCE_ATR * a
+    near = within(veto, args.stop, band)
+    hug = [x for x in within(watch, args.stop, band) if x not in near]
     checks = {
         "stop >= 1 ATR": risk_unit >= a,
         f"stop <= {limit * 100:.2f}% (x{args.leverage} liquidation buffer)": risk_unit / entry <= limit,
@@ -338,22 +391,86 @@ def plan(args) -> None:
     print(f"size {qty.normalize():f} (step {meta['step']}) notional {notional:.2f} margin "
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
+    mc_tg_line = None
+    if not getattr(args, "no_kronos", False) and len(k1d) > 15:
+        try:
+            from kronos import evaluate_trade_paths, format_mc_plan, simulate_paths
+            mc = simulate_paths(
+                k1d[:-1], mark=mark, symbol=sym,
+                pred_len=args.horizon_days, sample_count=args.mc_samples, interval="1d",
+            )
+            ev = evaluate_trade_paths(mc, side=side, entry=entry, stop=args.stop, target=args.target, order=order)
+            mc_lines, mc_tg_line = format_mc_plan(mc, ev)
+            for line in mc_lines:
+                print(line)
+        except Exception as exc:
+            print(f"Kronos-small MC error: {exc}")
     for name, ok in checks.items():
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
+    if hug:
+        print(f"  WARN  stop within {STOP_CLEARANCE_ATR} ATR of a daily high/low of the last {RECENT_DAYS}"
+              f" days (near: {', '.join(f'{x:.6g}' for x in hug)})")
     passed = all(checks.values())
     print("VERDICT:", "PASS" if passed else "FAIL — fix the levels or drop the trade")
     if passed:
+        pending = order != "vào ngay"
+        now = datetime.now(timezone.utc)
+        events = load_macro_events()
+        soon = [f"{name} {ict(t)}" for t, name in events if now <= t <= now + timedelta(hours=24)]
+        # Facts the report must not talk past: it may grade lower than this, never higher.
+        caps = ([f"stop sát đỉnh/đáy ngày gần ({', '.join(f'{x:.6g}' for x in hug)})"] if hug else []) + (
+            [f"lệnh chờ 24h trùm {', '.join(soon)}"] if pending and soon else []) + (
+            [f"entry cách mark {abs(entry - mark) / a:.2f} ATR, chỉ khớp khi giá chạy mạnh"]
+            if pending and abs(entry - mark) > a else [])
+        if soon:
+            print("Sự kiện vĩ mô 24h tới: " + ", ".join(soon))
+        if not events:
+            print(f"⚠️ Không đọc được {MACRO_EVENTS.name}: tự kiểm CPI/PPI/việc làm/FOMC trong 24h tới")
+        elif events[-1][0] < now + timedelta(days=30):
+            print(f"⚠️ {MACRO_EVENTS.name} chỉ có lịch tới {ict(events[-1][0])}: cập nhật lịch mới")
+        print("Hạng tối đa: " + ("B — " + "; ".join(caps) if caps else "A"))
         # Report-ready lines: the report pastes TG:, the desk runs DESK:, so no level gets retyped.
         kind = {"vào ngay": "Vào ngay", "lệnh chờ (limit)": "Limit", "lệnh chờ (stop)": "Stop"}[order]
-        print(f"TG: {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'} {sym} — {kind}")
+        print(f"TG: {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'} {sym} — {kind}{' (tối đa hạng B)' if caps else ''}")
         print(f"TG: • Vào: {entry:.10g} | Stop: {args.stop:.10g} ({(args.stop / entry - 1) * 100:+.2f}%,"
               f" {risk_unit / a:.2f} ATR) | TP: {args.target:.10g} ({(args.target / entry - 1) * 100:+.2f}%)"
               f" | R:R: {reward_unit / risk_unit:.2f}")
-        print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f}"
+        print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f} (x{args.leverage})"
               f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
+        if mc_tg_line:
+            print(mc_tg_line)
         if order != "lệnh chờ (stop)":  # the desk cannot grade stop entries yet
             print(f"DESK: ~/crypto-desk-rewrite/scripts/desk log-call {side} {sym}"
                   f" --entry {entry:.10g} --stop {args.stop:.10g} --target {args.target:.10g}")
+
+
+def stops(args) -> None:
+    """Walk entries from the mark (down for LONG, up for SHORT) and print the tightest stop plan would pass."""
+    sym, side = args.symbol.upper(), args.side.upper()
+    meta = symbol_meta(get("/fapi/v1/exchangeInfo")).get(sym)
+    if meta is None:
+        raise SystemExit(f"{sym} is not a TRADING crypto USDT perpetual on Binance USDⓈ-M"
+                         " (stablecoins and gold are left out)")
+    mark = float(get("/fapi/v1/premiumIndex", symbol=sym)["markPrice"])
+    a, veto, watch = stop_levels(get("/fapi/v1/klines", symbol=sym, interval="1d", limit=260))
+    if a is None:
+        raise SystemExit(f"{sym}: fewer than 15 closed daily candles, so no ATR14 yet — skip this contract")
+    cap, sign, band = max_stop_fraction(args.leverage, meta["mmr"]), 1 if side == "LONG" else -1, STOP_CLEARANCE_ATR * a
+    print(f"STOPS {side} {sym} | mark {mark:.6g} | ATR14d {a:.6g} ({a / mark * 100:.2f}%)"
+          f" | stop 1 ATR..{cap * 100:.2f}% | band ±{band:.4g} | targets are 1.5R/2R, not structure")
+    for i in range(round(args.span / args.step) + 1):
+        e = mark * (1 - sign * i * args.step)
+        dist = a
+        while dist <= e * cap and within(veto, e - sign * dist, band):
+            dist += a / 100
+        label = f"  entry {e:.6g} ({(e / mark - 1) * 100:+.1f}%):"
+        if dist > e * cap:
+            print(label, "no valid stop")
+            continue
+        stop, hug = e - sign * dist, within(watch, e - sign * dist, band)
+        print(f"{label} stop {stop:.6g} ({(stop / e - 1) * 100:+.2f}%, {dist / a:.2f} ATR)"
+              f" -> 1.5R {e + sign * 1.5 * dist:.6g} | 2R {e + sign * 2 * dist:.6g}"
+              + (f" | WARN near {', '.join(f'{x:.6g}' for x in hug)}" if hug else ""))
 
 
 def main() -> None:
@@ -366,6 +483,9 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=6)
     p = sub.add_parser("detail")
     p.add_argument("symbols", nargs="+")
+    p.add_argument("--horizon-days", type=int, default=10)
+    p.add_argument("--mc-samples", type=int, default=30)
+    p.add_argument("--no-kronos", action="store_true")
     p = sub.add_parser("plan")
     p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])
     p.add_argument("symbol")
@@ -378,8 +498,17 @@ def main() -> None:
     p.add_argument("--margin-cap", type=float, default=0.20)
     p.add_argument("--min-rr", type=float, default=1.5)
     p.add_argument("--entry-band", type=float, default=0.005)
+    p.add_argument("--horizon-days", type=int, default=10)
+    p.add_argument("--mc-samples", type=int, default=30)
+    p.add_argument("--no-kronos", action="store_true")
+    p = sub.add_parser("stops")
+    p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])
+    p.add_argument("symbol")
+    p.add_argument("--span", type=float, default=0.07)
+    p.add_argument("--step", type=float, default=0.005)
+    p.add_argument("--leverage", type=int, default=5)
     args = parser.parse_args()
-    {"scan": scan, "detail": detail, "plan": plan}[args.cmd](args)
+    {"scan": scan, "detail": detail, "plan": plan, "stops": stops}[args.cmd](args)
 
 
 if __name__ == "__main__":

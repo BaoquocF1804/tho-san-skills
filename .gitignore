@@ -4,6 +4,7 @@
 !/tho-san/
 !/tho-san-co-phieu/
 !/tho-san-swing/
+!/macro_events.json
 __pycache__/
 .ruff_cache/
 .pytest_cache/

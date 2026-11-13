@@ -10,8 +10,8 @@ Supports all stock perpetual categories on Binance USDⓈ-M; the market tag foll
 Daily and 4h indicators skip Sat/Sun candles: the perps trade 24/7 but barely move while the exchanges are shut.
 
 Commands:
-  python3 hunt_stock_data.py scan [--top 40] [--min-qv 1000000] [--market all|us|kr|hk|cn|adr|pre] [--leverage 5]
-      global stock universe table (ETFs excluded by default) + /tmp/tho-san-co-phieu/market.json
+  python3 hunt_stock_data.py scan [--top 0] [--min-qv 1000000] [--market all|us|kr|hk|cn|adr|pre] [--leverage 5]
+      global stock universe table (ETFs excluded by default) + ~/.local/share/tho-san-co-phieu/market.json
   python3 hunt_stock_data.py detail SYMBOL [SYMBOL ...]
       levels in ATRs, positioning, global fundamentals (TradingView + SEC EDGAR 10-Q/10-K/20-F/6-K), earnings dates, 1d/4h bars
   python3 hunt_stock_data.py news [SYMBOL ...]
@@ -19,7 +19,13 @@ Commands:
       last 30 days for US-listed filers, Google News by company name for the rest; all with dates
   python3 hunt_stock_data.py plan LONG|SHORT SYMBOL --stop X --target Y [--entry E] [--capital 1000] [--horizon-days 20]
       checks mark-index deviation, ATR/liquidation stop bounds, R:R, earnings inside the holding window, and sizes position;
-      on PASS prints the TG: lines the report pastes verbatim
+      on PASS prints the TG: lines the report pastes verbatim and `Hạng tối đa` (B when the stop is within 0.25 ATR
+      of a daily high/low of the last 20 sessions, a pending order spans a US macro print from macro_events.json
+      at the skills repo root, or a pending entry sits over 1 ATR from mark); --log saves the order
+  python3 hunt_stock_data.py stops LONG|SHORT SYMBOL [--span 0.07] [--step 0.005] [--leverage 5]
+      walks entries away from the mark and prints the tightest stop plan would pass, with 1.5R/2R targets
+  python3 hunt_stock_data.py orders [--days 20] [--cancel ID]
+      logged orders with fill status from Binance bars (waiting / expired / filled, then stop, target or open R)
 
 Read-only public endpoints (Binance fapi + TradingView Scanner + SEC EDGAR + Google News and Yahoo Finance RSS);
 nothing here can trade.
@@ -28,6 +34,7 @@ nothing here can trade.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, Decimal
@@ -40,12 +47,17 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from zoneinfo import ZoneInfo
 
 BASE = "https://fapi.binance.com"
 TV_SCAN_URL = "https://scanner.tradingview.com/global/scan"
-OUT_DIR = Path("/tmp/tho-san-co-phieu")
+OUT_DIR = Path.home() / ".local/share/tho-san-co-phieu"  # /tmp is emptied on every WSL restart, orders with it
 OUT = OUT_DIR / "market.json"
+ORDERS = OUT_DIR / "orders.json"
 SEC_CACHE_DIR = OUT_DIR / "sec-cache"
+MACRO_EVENTS = Path(__file__).resolve().parents[2] / "macro_events.json"  # repo root, shared with tho-san
+RECENT_SESSIONS = 20  # every daily high/low this recent is a watched level, swing point or not
+ICT = timezone(timedelta(hours=7))
 
 SEC_USER_AGENT = os.environ.get(
     "SEC_USER_AGENT",
@@ -125,6 +137,8 @@ KNOWN_ETFS = {
     "KORU", "SNXX", "MUU", "MVLL", "INTW", "DRAM", "NVDL", "NVDU", "TSLL", "CONL",
     "MSTU", "MSTX", "AMDL", "AAPU", "GGLL", "METU", "MSFU", "PLTU",
     "KODEX200", "CSOPSKHYNIX2L", "CSOPSAMSUNG2L",
+    "UVXY",  # VIX ETP that the TradingView lookup misses (tho-san-swing NOT_STOCKS)
+    "STXX",  # trades ~31.7x the stock Yahoo/TradingView list under this ticker: not that company
 }
 
 PUMP_CHANGE_24H = 20.0  # percent: single-day stock move not yet in closed-candle ATR
@@ -132,6 +146,7 @@ PUMP_FUNDING = 0.005
 MAX_MARK_INDEX_DEV = 0.005  # 0.5% max deviation between markPrice and indexPrice
 TAKER_FEE_ROUNDTRIP = 0.001
 STOP_CLEARANCE_ATR = 0.25  # a stop nearer than this to a daily high/low goes with the wick that sweeps it
+STOP_ROOM = 1.25  # a leverage's stop cap must clear 1 ATR by a quarter ATR, or the level bands swallow the window
 
 REV_TAGS = [
     "Revenues",
@@ -662,6 +677,113 @@ def max_stop_fraction(leverage: int, mmr: float) -> float:
     return (1 / leverage - mmr) / 2
 
 
+def stop_levels(k1d: list) -> tuple[float | None, list[float], list[float]]:
+    """ATR14 and the levels a stop is measured against, on weekday bars.
+
+    veto: 120-day swing points plus every high/low of the last two weekdays and today (swings() needs two
+    later bars to confirm a point); a stop this close fails. watch: every daily high/low of the last
+    RECENT_SESSIONS weekdays and today; a stop this close sits where the next sweep lands, so it caps the grade.
+    """
+    def extremes(bars: list) -> list[float]:
+        return [float(k[i]) for k in bars for i in (2, 3)]
+
+    d = weekday_bars(k1d[:-1])
+    h, lo, c = ([float(k[i]) for k in d] for i in (2, 3, 4))
+    today = weekday_bars(k1d[-1:])
+    sh, sl = swings(h, lo)
+    return (atr(h, lo, c), sorted(set(sh + sl + extremes(d[-2:] + today))),
+            sorted(set(extremes(d[-RECENT_SESSIONS:] + today))))
+
+
+def within(levels: list[float], price: float, band: float) -> list[float]:
+    return [x for x in levels if abs(x - price) < band]
+
+
+def load_macro_events() -> list[tuple[datetime, str]]:
+    """US prints that move every market (CPI, PPI, jobs report, FOMC), from the table shared with tho-san."""
+    try:
+        rows = json.loads(MACRO_EVENTS.read_text())["events"]
+    except (OSError, ValueError, KeyError):
+        return []
+    ny = ZoneInfo("America/New_York")
+    return sorted((datetime.fromisoformat(r["et"]).replace(tzinfo=ny).astimezone(timezone.utc), r["name"])
+                  for r in rows)
+
+
+def ict(t: datetime) -> str:
+    return t.astimezone(ICT).strftime("%d/%m %H:%M") + " ICT"
+
+
+def load_orders() -> list[dict]:
+    try:
+        return json.loads(ORDERS.read_text())
+    except FileNotFoundError:
+        return []
+
+
+def save_orders(orders: list[dict]) -> None:
+    # ponytail: no file lock; two agents logging in the same instant can lose one write
+    ORDERS.parent.mkdir(parents=True, exist_ok=True)
+    tmp = ORDERS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(orders, ensure_ascii=False, indent=1))
+    os.replace(tmp, ORDERS)
+
+
+def log_order(o: dict) -> str:
+    """Save a PASS order so the next hunt still sees it; the same live call keeps its first id."""
+    orders, now = load_orders(), datetime.now(timezone.utc)
+    for old in orders:
+        if (all(old[k] == o[k] for k in ("symbol", "side", "entry", "stop", "target"))
+                and "canceled_at" not in old and datetime.fromisoformat(old["expires_at"]) > now):
+            return f"LOG: trùng #{old['id']} (giữ lệnh cũ, không ghi thêm)"
+    o.update(id=max((x["id"] for x in orders), default=0) + 1, created_at=now.isoformat(),
+             expires_at=(now + timedelta(hours=24)).isoformat())
+    save_orders(orders + [o])
+    return f"LOG: #{o['id']}"
+
+
+def _bar_time(k: list) -> datetime:
+    return datetime.fromtimestamp(k[0] / 1000, timezone.utc)
+
+
+def fill_time(o: dict, k5m: list) -> datetime | None:
+    """When a logged order fills: a market call at once, a limit or stop entry on the first 5-minute bar
+    inside its 24 hours that trades through the entry."""
+    created, expires = (datetime.fromisoformat(o[k]) for k in ("created_at", "expires_at"))
+    if o["order"] == "market":
+        return created
+    dips = (o["order"] == "limit") == (o["side"] == "LONG")  # buy limits and sell stops fill on the way down
+    for k in k5m:
+        t = _bar_time(k)
+        if created <= t < expires and (float(k[3]) <= o["entry"] if dips else float(k[2]) >= o["entry"]):
+            return t
+    return None
+
+
+def order_status(o: dict, k5m: list, k1h: list, mark: float, now: datetime) -> str:
+    """Where a logged order stands. Bars carry no tick order, so a bar touching both counts the stop, and the
+    fill hour can't count a target it may have traded before the fill."""
+    if o.get("canceled_at"):
+        return f"ĐÃ HỦY {ict(datetime.fromisoformat(o['canceled_at']))}"
+    filled = fill_time(o, k5m)
+    if filled is None:
+        expires = datetime.fromisoformat(o["expires_at"])
+        return ("HẾT HẠN · không khớp" if now >= expires
+                else f"CHỜ · còn {int((expires - now).total_seconds() // 3600)}h")
+    sign = 1 if o["side"] == "LONG" else -1
+    risk = (o["entry"] - o["stop"]) * sign
+    head = f"KHỚP {ict(filled)}"
+    for k in k1h:
+        t, high, low = _bar_time(k), float(k[2]), float(k[3])
+        if t + timedelta(hours=1) <= filled:
+            continue
+        if (low <= o["stop"]) if sign > 0 else (high >= o["stop"]):
+            return f"{head} · chạm stop {ict(t)} (-1.00R)"
+        if not t <= filled < t + timedelta(hours=1) and ((high >= o["target"]) if sign > 0 else (low <= o["target"])):
+            return f"{head} · chạm TP {ict(t)} ({(o['target'] - o['entry']) * sign / risk:+.2f}R)"
+    return f"{head} · đang chạy {(mark - o['entry']) * sign / risk:+.2f}R (mark {mark:.6g})"
+
+
 def equity_symbol_meta(info) -> dict[str, dict]:
     meta = {}
     for s in info["symbols"]:
@@ -750,19 +872,50 @@ def above(price, level):
     return "-" if level is None else ("Y" if price > level else "n")
 
 
+def suggest_leverage(atr_pct: float | None, mmr: float, max_leverage: int) -> int | None:
+    """Highest leverage from max_leverage down to x2 whose stop cap clears 1 ATR by STOP_ROOM, None past x2.
+
+    Risk stays 1% of capital at any leverage (size comes from the stop distance); a lower one only ties up more
+    margin and moves liquidation further off.
+    """
+    if not atr_pct:
+        return None
+    return next((lev for lev in range(max_leverage, 1, -1)
+                 if max_stop_fraction(lev, mmr) * 100 >= atr_pct * STOP_ROOM), None)
+
+
 def _tag_row(row: dict, leverage: int) -> dict:
-    limit = max_stop_fraction(leverage, row["mmr"]) * 100
     pump = abs(row["chg24h"]) >= PUMP_CHANGE_24H or abs(row["fund"]) >= PUMP_FUNDING
     idx_bad = row["mark_index_dev_pct"] > MAX_MARK_INDEX_DEV * 100
+    row["lev"] = suggest_leverage(row["atr_pct"], row["mmr"], leverage)
     if idx_bad:
         row["flag"] = "INDEX"
     elif pump:
         row["flag"] = "PUMP"
-    elif row["atr_pct"] and row["atr_pct"] <= limit:
-        row["flag"] = "OK"
-    else:
+    elif row["lev"] is None:
         row["flag"] = "ATR"
+    else:
+        row["flag"] = "OK" if row["lev"] == leverage else f"OKx{row['lev']}"
     return row
+
+
+def select_universe(meta: dict, tickers: dict, tv_map: dict, min_qv: float, top: int, market: str,
+                    include_etfs: bool) -> list[str]:
+    """Contracts to scan, most liquid first: every one above min_qv unless `top` caps the count (0 = no cap)."""
+    out = []
+    for sym, t in sorted(tickers.items(), key=lambda kv: -float(kv[1]["quoteVolume"])):
+        if float(t["quoteVolume"]) < min_qv:
+            continue
+        base = meta[sym]["base_asset"].upper()
+        tv_info = tv_map.get(base)
+        if not include_etfs and (base in KNOWN_ETFS or bool(tv_info and tv_info.get("is_etf"))):
+            continue
+        if market != "ALL" and resolve_market_tag(meta[sym]["underlying_type"], tv_info) != market:
+            continue
+        out.append(sym)
+        if top and len(out) >= top:
+            break
+    return out
 
 
 def _earn_tag(fund_info: dict | None) -> str:
@@ -797,23 +950,7 @@ def scan(args) -> None:
     sec_map = load_sec_tickers()
     market_filter = args.market.upper()
 
-    # Filter candidates by quoteVolume, ETF status, and market filter
-    candidates = []
-    for sym, t in sorted(tickers.items(), key=lambda kv: -float(kv[1]["quoteVolume"])):
-        if float(t["quoteVolume"]) < args.min_qv:
-            continue
-        base = meta[sym]["base_asset"].upper()
-        utype = meta[sym]["underlying_type"]
-        tv_info = tv_map.get(base)
-        is_etf = (base in KNOWN_ETFS) or bool(tv_info and tv_info.get("is_etf"))
-        if is_etf and not args.include_etfs:
-            continue
-        mkt = resolve_market_tag(utype, tv_info)
-        if market_filter != "ALL" and mkt != market_filter:
-            continue
-        candidates.append(sym)
-        if len(candidates) >= args.top:
-            break
+    candidates = select_universe(meta, tickers, tv_map, args.min_qv, args.top, market_filter, args.include_etfs)
 
     def _process(sym: str) -> dict | None:
         base = meta[sym]["base_asset"].upper()
@@ -841,9 +978,11 @@ def scan(args) -> None:
     }, indent=1))
 
     etf_note = "ETFs included" if args.include_etfs else "ETFs excluded"
-    print(f"{len(rows)} global equity perpetuals (market={market_filter}, {etf_note}), x{args.leverage}: "
-          f"OK = tradeable, ATR = too volatile, PUMP = extreme move/funding, INDEX = mark/index >0.5%. Saved {OUT}")
-    print(f"{'sym':<14}{'mkt':<4}{'flag':>5}{'mark':>9}{'24h':>6}{'7d':>6}{'20d':>6}{'rsSPY':>6}"
+    print(f"{len(rows)} global equity perpetuals (market={market_filter}, {etf_note}, 24h volume >= "
+          f"{args.min_qv / 1e6:g}M{f', top {args.top}' if args.top else ''}): OK = tradeable at x{args.leverage},"
+          f" OKxN = ATR too wide for x{args.leverage}, run stops/plan with --leverage N (risk stays 1%),"
+          f" ATR = too volatile even at x2, PUMP = extreme move/funding, INDEX = mark/index >0.5%. Saved {OUT}")
+    print(f"{'sym':<14}{'mkt':<4}{'sector':<13}{'flag':>5}{'mark':>9}{'24h':>6}{'7d':>6}{'20d':>6}{'rsSPY':>6}"
           f"{'>e20':>5}{'e20>50':>7}{'rsi1d':>6}{'rsi4h':>6}{'atr%':>5}{'resA':>5}{'supA':>5}"
           f"{'oi7d':>7}{'ls%':>4}{'top%':>5}{'fund%':>8}{'revYoY':>8}{'niYoY':>8}{'pe':>6}{'earn':>6}")
     for r in rows:
@@ -855,12 +994,15 @@ def scan(args) -> None:
         rev_str = f"{fnd['rev_yoy_pct']:.1f}%" if fnd.get("rev_yoy_pct") is not None else "-"
         ni_str = f"{fnd['ni_yoy_pct']:.1f}%" if fnd.get("ni_yoy_pct") is not None else "-"
         pe_str = f"{fnd['pe_ttm']:.1f}" if fnd.get("pe_ttm") is not None else "-"
-        print(f"{r['symbol']:<14}{fnd.get('market', '-'):<4}{r['flag']:>5}{r['mark']:>9.5g}{r['chg24h']:>6.1f}"
+        print(f"{r['symbol']:<14}{fnd.get('market', '-'):<4}{(fnd.get('sector') or '-')[:12]:<13}{r['flag']:>5}"
+              f"{r['mark']:>9.5g}{r['chg24h']:>6.1f}"
               f"{fmt(r['chg7d'], 1):>6}{fmt(r['chg20d'], 1):>6}{fmt(r['rs20_vs_spy'], 1):>6}"
               f"{above(r['mark'], r['ema20']):>5}{trend:>7}{fmt(r['rsi1d'], 0):>6}"
               f"{fmt(r['rsi4h'], 0):>6}{fmt(r['atr_pct'], 1):>5}{fmt(res, 1):>5}{fmt(sup, 1):>5}"
               f"{fmt(r['oi_chg7d'], 1):>7}{str(r['ls_pct30']):>4}{str(r['top_pct30']):>5}"
               f" {r['fund'] * 100:>7.4f}%{rev_str:>8}{ni_str:>8}{pe_str:>6}{_earn_tag(fnd):>6}")
+    by_sector = Counter((r.get("fundamentals") or {}).get("sector") or "-" for r in rows if r["flag"].startswith("OK"))
+    print("Tradeable by sector: " + " · ".join(f"{name} {n}" for name, n in by_sector.most_common()))
 
 
 def detail(args) -> None:
@@ -930,7 +1072,8 @@ def detail(args) -> None:
 
         print("  last closed days (date o/h/l/c):", " ".join(
             f"{k[0]} {g(k[1])}/{g(k[2])}/{g(k[3])}/{g(k[4])}" for k in r["last5_daily"]))
-        today = get_binance("/fapi/v1/klines", symbol=sym, interval="1d", limit=1)[0]
+        k1d_all = get_binance("/fapi/v1/klines", symbol=sym, interval="1d", limit=200)
+        today = k1d_all[-1]
         print(f"  today so far o {g(float(today[1]))} h {g(float(today[2]))} l {g(float(today[3]))}")
         bars = get_binance("/fapi/v1/klines", symbol=sym, interval="4h", limit=7)
         for k in bars:
@@ -938,6 +1081,19 @@ def detail(args) -> None:
             t = datetime.fromtimestamp(k[0] / 1000, timezone.utc).strftime("%m-%d %HZ")
             print(f"   4h {t} {g(float(k[1]))}/{g(float(k[2]))}/{g(float(k[3]))}/{g(float(k[4]))}"
                   f" taker-buy {buy:.0f}%{'  LIVE, not closed' if k is bars[-1] else ''}")
+        d_closed = weekday_bars(k1d_all[:-1])
+        if not getattr(args, "no_kronos", False) and len(d_closed) >= 15:
+            try:
+                from kronos import format_mc_detail, simulate_paths
+                mc = simulate_paths(
+                    d_closed, mark=m, symbol=sym,
+                    pred_len=args.horizon_days, sample_count=args.mc_samples,
+                    interval="1d", weekdays_only=True,
+                )
+                for line in format_mc_detail(mc, a):
+                    print(line)
+            except Exception as exc:
+                print(f"  Kronos-small MC error: {exc}")
 
 
 def _rss_items(url: str, limit: int) -> list[dict[str, str]]:
@@ -1079,9 +1235,7 @@ def plan(args) -> None:
     index_price = float(prem.get("indexPrice") or mark)
     mark_index_dev = abs(mark - index_price) / index_price if index_price else 0.0
     k1d = get_binance("/fapi/v1/klines", symbol=sym, interval="1d", limit=370)
-    d = weekday_bars(k1d[:-1])
-    h, lo, c = ([float(k[i]) for k in d] for i in (2, 3, 4))
-    a = atr(h, lo, c)
+    a, veto, watch = stop_levels(k1d)
     if a is None:
         raise SystemExit(f"{sym}: fewer than 15 weekday candles, so no ATR14 yet — skip this contract")
     entry, note = args.entry or mark, ""
@@ -1104,11 +1258,9 @@ def plan(args) -> None:
     fee_unit = entry * TAKER_FEE_ROUNDTRIP
     net_rr = (reward_unit - fee_unit) / (risk_unit + fee_unit)
     d_to = fnd.get("days_to_earnings")
-    sh, sl = swings(h, lo)
-    # swings() needs two later bars to confirm a point, so the last two closed weekdays and today go in as they are
-    recent = d[-2:] + weekday_bars(k1d[-1:])
-    near = sorted({x for x in sh + sl + [float(k[i]) for k in recent for i in (2, 3)]
-                   if abs(x - args.stop) < STOP_CLEARANCE_ATR * a})
+    band = STOP_CLEARANCE_ATR * a
+    near = within(veto, args.stop, band)
+    hug = [x for x in within(watch, args.stop, band) if x not in near]
     checks = {
         f"Single-stock contract ({fnd['market']} — {fnd['company_name']}, not ETF)": not is_etf,
         f"|mark - index| / index <= {MAX_MARK_INDEX_DEV * 100:.2f}% (actual {mark_index_dev * 100:.3f}%)": (
@@ -1141,6 +1293,22 @@ def plan(args) -> None:
     print(f"size {qty.normalize():f} (step {meta['step']}) notional {notional:.2f} margin "
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
+    mc_tg_line = None
+    d_closed = weekday_bars(k1d[:-1])
+    if not getattr(args, "no_kronos", False) and len(d_closed) >= 15:
+        try:
+            from kronos import evaluate_trade_paths, format_mc_plan, simulate_paths
+            mc = simulate_paths(
+                d_closed, mark=mark, symbol=sym,
+                pred_len=args.horizon_days, sample_count=args.mc_samples,
+                interval="1d", weekdays_only=True,
+            )
+            ev = evaluate_trade_paths(mc, side=side, entry=entry, stop=args.stop, target=args.target, order=order)
+            mc_lines, mc_tg_line = format_mc_plan(mc, ev)
+            for line in mc_lines:
+                print(line)
+        except Exception as exc:
+            print(f"Kronos-small MC error: {exc}")
     d_since = fnd.get("days_since_earnings")
     if d_to is not None and 0 <= d_to <= 7:
         print(f"⚠️ CẢNH BÁO KQKD: Dự kiến công bố KQKD trong {d_to} ngày ({fnd.get('next_earnings_date')})")
@@ -1149,28 +1317,118 @@ def plan(args) -> None:
               f"| Kế tiếp: {fnd.get('next_earnings_date') or '-'} (còn ~{d_to if d_to is not None else '-'}d)")
     for name, ok in checks.items():
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
+    if hug:
+        print(f"  WARN  stop within {STOP_CLEARANCE_ATR} ATR of a daily high/low of the last {RECENT_SESSIONS}"
+              f" sessions (near: {', '.join(f'{x:.6g}' for x in hug)})")
     passed = all(checks.values())
     print("VERDICT:", "PASS" if passed else "FAIL — fix the levels or drop the trade")
     if passed:
+        pending = order != "vào ngay"
+        now = datetime.now(timezone.utc)
+        events = load_macro_events()
+        soon = [f"{name} {ict(t)}" for t, name in events if now <= t <= now + timedelta(hours=24)]
+        # Facts the report must not talk past: it may grade lower than this, never higher.
+        caps = ([f"stop sát đỉnh/đáy ngày gần ({', '.join(f'{x:.6g}' for x in hug)})"] if hug else []) + (
+            [f"lệnh chờ 24h trùm {', '.join(soon)}"] if pending and soon else []) + (
+            [f"entry cách mark {abs(entry - mark) / a:.2f} ATR, chỉ khớp khi giá chạy mạnh"]
+            if pending and abs(entry - mark) > a else [])
+        if soon:
+            print("Sự kiện vĩ mô 24h tới: " + ", ".join(soon))
+        if not events:
+            print(f"⚠️ Không đọc được {MACRO_EVENTS.name}: tự kiểm CPI/PPI/việc làm/FOMC trong 24h tới")
+        elif events[-1][0] < now + timedelta(days=30):
+            print(f"⚠️ {MACRO_EVENTS.name} chỉ có lịch tới {ict(events[-1][0])}: cập nhật lịch mới")
+        print("Hạng tối đa: " + ("B — " + "; ".join(caps) if caps else "A"))
         # Report-ready lines: the report pastes TG:, so no level or number gets retyped.
         kind = {"vào ngay": "Vào ngay", "lệnh chờ (limit)": "Limit", "lệnh chờ (stop)": "Stop"}[order]
         rev, pe = fnd.get("rev_yoy_pct"), fnd.get("pe_ttm")
         print(f"TG: {'🟢 LONG' if side == 'LONG' else '🔴 SHORT'} {sym} [{fnd['market']}]"
-              f" ({fnd['company_name']}) — {kind}")
+              f" ({fnd['company_name']}) — {kind}{' (tối đa hạng B)' if caps else ''}")
         print(f"TG: • Vào: {entry:.10g} | Stop: {args.stop:.10g} ({(args.stop / entry - 1) * 100:+.2f}%,"
               f" {risk_unit / a:.2f} ATR) | TP: {args.target:.10g} ({(args.target / entry - 1) * 100:+.2f}%)"
               f" | R:R: {reward_unit / risk_unit:.2f}")
-        print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f}"
+        print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f} (x{args.leverage})"
               f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
         print(f"TG: • Cơ bản & KQKD: Rev YoY {'-' if rev is None else f'{rev:+.1f}%'}, P/E {fmt(pe, 1)}"
               f" | KQKD: {fnd.get('next_earnings_date') or '-'}{'' if d_to is None else f' (còn ~{d_to}d)'}")
+        if mc_tg_line:
+            print(mc_tg_line)
+        if args.log:
+            print(log_order({
+                "symbol": sym, "side": side, "entry": entry, "stop": args.stop, "target": args.target,
+                "order": {"vào ngay": "market", "lệnh chờ (limit)": "limit", "lệnh chờ (stop)": "stop"}[order],
+                "qty": float(qty), "risk": round(float(qty) * risk_unit, 2), "grade": "B" if caps else "A"}))
+
+
+def stops(args) -> None:
+    """Walk entries from the mark (down for LONG, up for SHORT) and print the tightest stop plan would pass."""
+    sym = args.symbol.upper() if args.symbol.upper().endswith("USDT") else args.symbol.upper() + "USDT"
+    side = args.side.upper()
+    meta = equity_symbol_meta(get_binance("/fapi/v1/exchangeInfo")).get(sym)
+    if meta is None:
+        raise SystemExit(f"{sym} is not a TRADING stock USDT perpetual on Binance USDⓈ-M")
+    mark = float(get_binance("/fapi/v1/premiumIndex", symbol=sym)["markPrice"])
+    a, veto, watch = stop_levels(get_binance("/fapi/v1/klines", symbol=sym, interval="1d", limit=370))
+    if a is None:
+        raise SystemExit(f"{sym}: fewer than 15 weekday candles, so no ATR14 yet — skip this contract")
+    cap, sign, band = max_stop_fraction(args.leverage, meta["mmr"]), 1 if side == "LONG" else -1, STOP_CLEARANCE_ATR * a
+    print(f"STOPS {side} {sym} | mark {mark:.6g} | ATR14d {a:.6g} ({a / mark * 100:.2f}%)"
+          f" | stop 1 ATR..{cap * 100:.2f}% | band ±{band:.4g} | targets are 1.5R/2R, not structure")
+    for i in range(round(args.span / args.step) + 1):
+        e = mark * (1 - sign * i * args.step)
+        dist = a
+        while dist <= e * cap and within(veto, e - sign * dist, band):
+            dist += a / 100
+        label = f"  entry {e:.6g} ({(e / mark - 1) * 100:+.1f}%):"
+        if dist > e * cap:
+            print(label, "no valid stop")
+            continue
+        stop, hug = e - sign * dist, within(watch, e - sign * dist, band)
+        print(f"{label} stop {stop:.6g} ({(stop / e - 1) * 100:+.2f}%, {dist / a:.2f} ATR)"
+              f" -> 1.5R {e + sign * 1.5 * dist:.6g} | 2R {e + sign * 2 * dist:.6g}"
+              + (f" | WARN near {', '.join(f'{x:.6g}' for x in hug)}" if hug else ""))
+
+
+def _klines_since(sym: str, interval: str, since: datetime, limit: int) -> list:
+    return get_binance("/fapi/v1/klines", symbol=sym, interval=interval,
+                       startTime=int(since.timestamp() * 1000), limit=limit)
+
+
+def orders(args) -> None:
+    """Logged orders of the last --days with fill status, or cancel one that has not filled."""
+    rows, now = load_orders(), datetime.now(timezone.utc)
+    if args.cancel is not None:
+        o = next((x for x in rows if x["id"] == args.cancel), None)
+        if o is None:
+            raise SystemExit(f"Không có lệnh #{args.cancel} trong {ORDERS}")
+        if fill_time(o, _klines_since(o["symbol"], "5m", datetime.fromisoformat(o["created_at"]), 300)):
+            raise SystemExit(f"#{o['id']} đã khớp: không hủy được, quản lý như lệnh đang chạy")
+        o["canceled_at"] = now.isoformat()
+        save_orders(rows)
+        print(f"Đã hủy #{o['id']} {o['side']} {o['symbol']}")
+        return
+    shown = 0
+    for o in rows:
+        created = datetime.fromisoformat(o["created_at"])
+        if created < now - timedelta(days=args.days):
+            continue
+        mark = float(get_binance("/fapi/v1/premiumIndex", symbol=o["symbol"])["markPrice"])
+        status = order_status(o, _klines_since(o["symbol"], "5m", created, 300),
+                              _klines_since(o["symbol"], "1h", created, 1000), mark, now)
+        if status.startswith(("HẾT HẠN", "ĐÃ HỦY")) and created < now - timedelta(hours=48):
+            continue
+        shown += 1
+        print(f"#{o['id']} {o['side']} {o['symbol']} {o['order']} {o['entry']:g}/{o['stop']:g}/{o['target']:g}"
+              f" hạng ≤{o.get('grade', '?')} | tạo {ict(created)} | {status}")
+    if not shown:
+        print(f"Không có lệnh nào trong {args.days} ngày qua ({ORDERS})")
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("scan")
-    p.add_argument("--top", type=int, default=40)
+    p.add_argument("--top", type=int, default=0, help="cap on contracts scanned, 0 = every liquid one")
     p.add_argument("--min-qv", type=float, default=1_000_000)
     p.add_argument("--market", choices=["all", "us", "kr", "hk", "cn", "adr", "pre"], default="all")
     p.add_argument("--include-etfs", action="store_true")
@@ -1178,6 +1436,9 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=6)
     p = sub.add_parser("detail")
     p.add_argument("symbols", nargs="+")
+    p.add_argument("--horizon-days", type=int, default=20)
+    p.add_argument("--mc-samples", type=int, default=30)
+    p.add_argument("--no-kronos", action="store_true")
     p = sub.add_parser("news")
     p.add_argument("symbols", nargs="*")
     p.add_argument("--limit", type=int, default=6)
@@ -1194,8 +1455,20 @@ def main() -> None:
     p.add_argument("--min-rr", type=float, default=1.5)
     p.add_argument("--entry-band", type=float, default=0.005)
     p.add_argument("--horizon-days", type=int, default=20)
+    p.add_argument("--mc-samples", type=int, default=30)
+    p.add_argument("--no-kronos", action="store_true")
+    p.add_argument("--log", action="store_true", help="save a PASS order to the ledger `orders` reads")
+    p = sub.add_parser("stops")
+    p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])
+    p.add_argument("symbol")
+    p.add_argument("--span", type=float, default=0.07)
+    p.add_argument("--step", type=float, default=0.005)
+    p.add_argument("--leverage", type=int, default=5)
+    p = sub.add_parser("orders")
+    p.add_argument("--days", type=int, default=20)
+    p.add_argument("--cancel", type=int, metavar="ID")
     args = parser.parse_args()
-    {"scan": scan, "detail": detail, "news": news, "plan": plan}[args.cmd](args)
+    {"scan": scan, "detail": detail, "news": news, "plan": plan, "stops": stops, "orders": orders}[args.cmd](args)
 
 
 if __name__ == "__main__":
