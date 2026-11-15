@@ -12,7 +12,7 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
 ## Khung rủi ro (mặc định; dùng số người dùng nói nếu khác)
 | Tham số | Giá trị |
 |---|---|
-| Đòn bẩy | x5 (khác thì truyền `--leverage`) |
+| Đòn bẩy | x5 mặc định. Mã cờ `OKxN` (ATR quá rộng cho x5) chạy `stops` / `plan` với `--leverage N`; dòng `TG:` Size sẽ ghi `(xN)`. Rủi ro vẫn 1% vốn vì size tính theo khoảng cách stop; đòn bẩy thấp chỉ tốn thêm ký quỹ. Người dùng nói số khác thì truyền `--leverage` |
 | Vốn | 1000 USDT (`--capital`) |
 | Rủi ro mỗi lệnh | 1% vốn |
 | Ký quỹ tối đa mỗi lệnh | 20% vốn |
@@ -23,8 +23,9 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
 | Hạng | `plan` in `Hạng tối đa`. Là B khi stop dính `WARN`, khi lệnh chờ có 24 giờ hiệu lực trùm một sự kiện vĩ mô Mỹ (CPI, PPI, việc làm, FOMC; lịch nằm ở `macro_events.json`, gốc repo skills), hoặc khi entry chờ cách mark hơn 1 ATR. Báo cáo được hạ hạng, **không được nâng** |
 
 ## Quy trình
-1. **Dữ liệu:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py scan` (khoảng 15 giây, 40 hợp đồng lớn nhất). Chỉ săn mã có flag `OK`; `ATR` là quá biến động cho đòn bẩy hoặc mã mới niêm yết chưa đủ 15 nến ngày, `PUMP` là vừa pump/funding cực đoan.
+1. **Dữ liệu:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py scan` (khoảng 15 giây, 40 hợp đồng lớn nhất). Săn mã cờ `OK` (x5) và `OKxN` (dùng `--leverage N`). Bỏ `ATR` (quá biến động kể cả ở x2, hoặc mã mới chưa đủ 15 nến ngày) và `PUMP` (vừa pump hoặc funding cực đoan).
 2. **Tin tức. REQUIRED SUB-SKILL:** agent-reach.
+   - Đọc [references/nguon-tin.md](references/nguon-tin.md) trước: các trang đọc được khi Exa bị chặn (bản đồ thanh lý, ETF, lịch sự kiện) và các bẫy số liệu đã gặp.
    - Chạy `agent-reach doctor --text` trước.
    - Tìm bằng `agent-reach web search "..." --limit 5` (Exa) **tuần tự, cách nhau khoảng 15 giây**; đọc bài chính bằng `agent-reach web read <url>`; quét RSS rộng bằng `uv run -q --no-project --with feedparser python3` (feedparser lấy được ngày và link từng bài). Twitter/Reddit chỉ dùng khi doctor không báo `not_added`. agent-reach lỗi thì dùng web search có sẵn của runtime (`WebSearch` trên Claude Code, `search_web` trên Gemini).
    - Phải có đủ bốn nhóm, mỗi tin có ngày (bỏ tin không ngày):
@@ -33,7 +34,6 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
      - lịch sự kiện 2 tuần tới: mở khóa token, nâng cấp, FOMC
      - tin riêng từng mã trong shortlist (OI kỷ lục, hack, unlock, ETF)
 3. **Soi kỹ 3–6 mã:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py detail SYM1 SYM2 ...` (mức hỗ trợ/kháng cự đã gom cụm 0,25 ATR và tính cả S/R flip, vị thế nhỏ lẻ và top trader, nến hôm nay, nến 4h).
-   - Kronos-small MC đã **tắt mặc định** và **không được dùng để chấm hạng, hạ hạng hay bỏ lệnh**. Lần kiểm chứng ngày 13/11 so dự báo với kết quả thực tế: dự báo ngày bị kéo về giá trung bình 120 nến, quá tự tin, và đoán chiều kém hơn tung đồng xu. `--kronos` chỉ để thử nghiệm; kết quả của nó không đưa vào báo cáo hay Telegram.
 4. **Dựng setup, chiều nào cũng được:** hồi về hỗ trợ trong xu hướng; phá vỡ hoặc thủng mức có OI và taker xác nhận; đảo chiều khi đòn bẩy quá nóng (OI tăng mạnh, funding cao, nhỏ lẻ dồn một phía, top trader phía kia); catalyst có ngày. Stop đặt ở mức luận điểm sai **và** vượt qua cụm thanh lý / đỉnh đáy quét stop gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
    - Dò stop bằng `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py stops LONG|SHORT SYM [--span 0.07] [--step 0.005]`, đừng viết script dò riêng. Lệnh này in, cho từng entry tính từ mark, mức stop chặt nhất mà `plan` cho qua. Mục tiêu 1,5R/2R đi kèm chỉ để tham chiếu. `WARN near` là đỉnh/đáy 20 ngày gần ngay sát stop.
 5. **Kiểm từng lệnh ngay trước khi báo:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C]`. `FAIL` thì sửa mức hoặc bỏ lệnh; entry xa mark là lệnh chờ (`limit` hoặc `stop` theo output của script). Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark. `PASS` thì `plan` in `Hạng tối đa`, sẵn 3 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý) và dòng `DESK:`. Báo cáo dán nguyên văn các dòng `TG:` (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu; desk chạy đúng dòng `DESK:`. Không gõ lại con số nào.
@@ -47,21 +47,44 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
      - `"duplicate": false`: lệnh mới, báo cáo ghi `#id`.
      - `"duplicate": true`: lệnh cũ còn giữ, báo cáo ghi "giữ #id", không tính là lệnh mới.
      - `Error: Đã đủ ... lệnh tho-san trong 24 giờ` hoặc vượt rủi ro 24 giờ: bỏ lệnh khỏi báo cáo, đưa vào **Đã loại** với lý do giới hạn ngày.
-   - Lệnh chờ kiểu `stop` không có dòng `DESK:` vì desk chưa chấm được; báo cáo ghi "chưa ghi desk".
+   - Lệnh chờ kiểu `stop` không có dòng `DESK:` vì desk chưa chấm được; báo cáo ghi "chưa ghi desk". Desk không có lệnh này, nên lượt săn sau lấy nó từ mục Lệnh chờ của báo cáo gần nhất trong `~/.local/share/tho-san/` và kiểm khớp bằng nến 5m.
    - Kết quả xem bằng `desk scorecard`, dòng `tho-san`.
 
-## Báo cáo (tiếng Việt, đúng thứ tự)
-1. Một dòng kết luận: có hay không có lệnh hạng A, bao nhiêu lệnh. Hạng của mỗi lệnh không vượt `Hạng tối đa` mà `plan` in ra.
-2. Bối cảnh: tối đa 5 gạch đầu dòng, mỗi ý có ngày.
-3. Mỗi lệnh vào ngay:
-   - Tiêu đề là `### ` + dòng `TG:` đầu của `plan` (bỏ tiền tố) + ` #id`, ví dụ `### 🔴 SHORT BTCUSDT — Vào ngay #id`.
-   - Ngay dưới là 2 dòng `TG:` còn lại (Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý), nguyên văn, bỏ tiền tố.
-   - Rồi **Lý do**, **Phản biện**, **Sai nếu**. **Phản biện** chép lại lý do của `Hạng tối đa: B` nếu có.
-4. Lệnh chờ: như lệnh vào ngay (dòng `TG:` đầu đã ghi `Limit` hay `Stop`), hiệu lực 24 giờ. Lệnh cũ từ desk (bước 6), mỗi lệnh một dòng: lệnh chờ chưa khớp thì giữ #id, hủy #id, hoặc thay #id bằng #id mới; lệnh đang chạy thì #id, mã, chiều, entry, khớp lúc (`filled_at`), giữ hay đóng sớm ở mức nào.
-5. Đã loại: mỗi mã một dòng kèm lý do.
-6. Quản lý rủi ro: lệnh cùng chiều là tương quan; sự kiện sắp tới; điều kiện đóng sớm (mức BTC).
-7. Nguồn: link các bài đã dùng.
-8. Một dòng: phân tích tham khảo, không phải lời khuyên đầu tư.
+## Báo cáo (tiếng Việt)
+Báo cáo là đúng khung dưới đây: các mục này, theo thứ tự này. Chữ trong `<...>` là chỗ điền; mục không có gì thì ghi "Không có.". Bối cảnh tối đa 5 dòng, mỗi dòng có ngày. Hạng của mỗi lệnh không vượt `Hạng tối đa` mà `plan` in ra.
+
+```markdown
+**Kết luận:** <có / không có> lệnh hạng A; <n> lệnh vào ngay, <m> lệnh chờ, <k> lệnh cũ đang chạy.
+
+## Bối cảnh
+- <dd/mm>: <một ý> (<nguồn>)
+
+## Lệnh vào ngay
+### <dòng TG: đầu của plan, bỏ "TG: "> #<id desk>
+<dòng TG: thứ hai, nguyên văn, bỏ "TG: ">
+<dòng TG: thứ ba, nguyên văn, bỏ "TG: ">
+- **Lý do:** <...>
+- **Phản biện:** <lý do của `Hạng tối đa: B` nếu có> <...>
+- **Sai nếu:** <mức đóng sớm hoặc hủy>
+
+## Lệnh chờ (hiệu lực 24 giờ)
+<mỗi lệnh trình bày như trên; lệnh kiểu stop ghi "chưa ghi desk" thay cho #id>
+
+## Lệnh cũ
+- #<id> <MÃ> <chiều>, chờ khớp: <giữ / hủy / thay bằng #id mới>
+- #<id> <MÃ> <chiều>, đang chạy, entry <...>, khớp <filled_at>: <giữ / đóng sớm ở mức ...>
+
+## Đã loại
+- <MÃ>: <lý do một câu>
+
+## Quản lý rủi ro
+- <lệnh cùng chiều là tương quan; sự kiện sắp tới; mức BTC để đóng sớm>
+
+## Nguồn
+- <link bài đã dùng>
+
+_Phân tích tham khảo, không phải lời khuyên đầu tư._
+```
 
 ## Gửi Telegram (mỗi lần săn — bản rút gọn 1 tin nhắn)
 - Bản đầy đủ lưu vào `~/.local/share/tho-san/report-<YYYYmmdd-HHMM>.md` và hiển thị trong khung chat. Không lưu ở `/tmp`, vì WSL khởi động lại là mất.
@@ -92,6 +115,8 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
 | Coi funding 0,0100% là long quá nóng; gọi `avg last 21` là trung bình 30 ngày | 0,01%/8h là mức mặc định của Binance (trung tính); `avg last 21` là 21 kỳ, tức 7 ngày với kỳ 8h |
 | Mục bản đồ thanh lý chỉ ghi số tiền đã bị thanh lý | Ghi mức giá các cụm long/short đang chờ, rồi đặt stop vượt các cụm đó |
 | Chọn mã vừa pump vì ATR nến đóng còn nhỏ | Bỏ mã flag `PUMP` |
+| Bỏ mã `OKxN` vì nghĩ là "quá biến động", hoặc chạy `plan` ở x5 cho mã `OKx3` | `OKxN` vẫn săn được: chạy `stops` / `plan` với `--leverage N` và dán dòng Size có `(xN)` |
+| Mở báo cáo bằng bối cảnh, thêm bảng quét rổ hay bảng tổng hợp lệnh (báo cáo 15/11 08:17) | Dòng đầu là **Kết luận:**; điền đúng khung ở mục Báo cáo |
 | Đặt lệnh chờ đánh thủng đáy nhưng ghi là `limit bán` | Đánh thủng đáy (SHORT dưới giá mark) hoặc vượt đỉnh (LONG trên giá mark) phải là lệnh `stop` |
 | Ba lệnh cùng chiều không cảnh báo | Nêu tương quan, khuyên tối đa 2 lệnh |
 | Bịa số hoặc mức giá | Chỉ dùng số từ script và bài có nguồn |

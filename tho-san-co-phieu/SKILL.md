@@ -24,8 +24,8 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
 | Stop | ≥ 1 ATR14 ngày, ≤ `(1/đòn bẩy − mmr)/2` (8,75% ở x5) và cách mọi đỉnh/đáy ngày ≥ 0,25 ATR (`plan` tự kiểm: sát swing 120 phiên hoặc đỉnh/đáy 2 phiên gần nhất thì `FAIL`; sát đỉnh/đáy bất kỳ trong 20 phiên thì `WARN` và hạ trần hạng). ATR và mọi chỉ báo ngày/4h chỉ tính nến T2–T6, vì cuối tuần sàn cơ sở đóng và giá gần như đứng |
 | R:R gộp | ≥ 1,5 (`plan` in thêm `net R:R` sau phí taker 2 chiều 0,10%) |
 | Vào ngay | entry trong ±0,5% giá mark; xa hơn là lệnh chờ (`limit` nếu chờ hồi, `stop` nếu đánh phá vỡ) |
-| KQKD | Không giữ lệnh qua ngày KQKD: `plan` FAIL nếu KQKD rơi vào `--horizon-days` (mặc định 20). Muốn vào trước KQKD thì rút `--horizon-days` để đóng trước ngày đó và ghi vào **Sai nếu**; không thì bỏ lệnh |
-| Tầm nhìn | ≤ 20 ngày, tối đa 3 lệnh |
+| KQKD | Không giữ lệnh qua ngày KQKD: `plan` FAIL nếu KQKD rơi vào `--horizon-days` (mặc định 20). Muốn vào trước KQKD thì rút `--horizon-days` để đóng trước ngày đó và ghi vào **Sai nếu**; không thì bỏ lệnh. Ngày đã xác nhận bằng tin thì truyền `--earnings-date YYYY-MM-DD`; nó thay ngày của script |
+| Tầm nhìn | ≤ 20 ngày; tối đa 3 lệnh mở cùng lúc (lệnh chờ khớp cộng lệnh đã khớp đang chạy). `plan --log` từ chối lệnh thứ 4 |
 | Hạng | `plan` in `Hạng tối đa`. Là B khi stop dính `WARN`, khi lệnh chờ có 24 giờ hiệu lực trùm một sự kiện vĩ mô Mỹ (CPI, PPI, việc làm, FOMC; lịch nằm ở `macro_events.json`, gốc repo skills), hoặc khi entry chờ cách mark hơn 1 ATR. Báo cáo được hạ hạng, **không được nâng** |
 
 ## Quy trình
@@ -38,48 +38,73 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
    - Cột `earn`: `Xd!` là KQKD trong ≤ 7 ngày, `Xd` là còn X ngày, `-Xd` là vừa công bố X ngày trước. `7d`/`20d` tính theo phiên.
 2. **Tin tức. REQUIRED SUB-SKILL:** agent-reach.
    - Chạy `hunt_stock_data.py news SYM1 SYM2 ...`: Google News RSS cho Phố Wall, châu Á, Fed/lợi suất, chip/thuế quan. Mã niêm yết ở Mỹ (`US`/`ADR`) lấy RSS Yahoo Finance theo mã, có link bài gốc (link Google News chỉ là link chuyển hướng); mã châu Á và `PRE` tìm qua Google News theo tên công ty.
-   - Mã nộp hồ sơ SEC có thêm mục `SEC 8-K/6-K 30 ngày`: dòng có `!` (KQKD, đổi lãnh đạo, hợp đồng lớn, M&A, nợ mới, suy giảm tài sản, hủy niêm yết, phá sản…) là chất xúc tác: mở link SEC đọc trước khi dựng setup.
+   - Mã nộp hồ sơ SEC có thêm mục `SEC 8-K/6-K 30 ngày`: dòng có `!` (KQKD, đổi lãnh đạo, hợp đồng lớn, M&A, nợ mới, suy giảm tài sản, hủy niêm yết, phá sản…) là chất xúc tác: mở link SEC đọc trước khi dựng setup. Dòng `6-K ?` (công ty nước ngoài, 6-K không có mã mục) cũng mở xem. Mục ghi `SEC không trả lời` thì mở EDGAR bằng WebFetch.
+   - Đọc [references/bay-co-phieu.md](references/bay-co-phieu.md) trước khi viết phần cơ bản và đặt lệnh chờ: bẫy BCTC (Exhibit 99.1, cột GP/Op), hồ sơ SEC, giờ giao dịch và lệnh cuối tuần.
    - Bổ sung: `agent-reach doctor --text` trước, rồi `agent-reach web search "..." --limit 5` **tuần tự, cách nhau khoảng 15 giây**; đọc bài chính bằng `agent-reach web read <url>`. agent-reach lỗi thì dùng web search có sẵn của runtime (`WebSearch` trên Claude Code, `search_web` trên Gemini).
    - Phải đủ bốn nhóm, mỗi tin có ngày (bỏ tin không ngày):
      - vĩ mô Mỹ và châu Á 48 giờ qua: S&P 500, Nasdaq, KOSPI, Hang Seng, lợi suất 10 năm Mỹ, Fed/FOMC, thuế quan, kiểm soát xuất khẩu chip
-     - ngày KQKD của từng mã trong shortlist. Ngày từ script có thể là ước tính (nguồn SEC là hồ sơ gần nhất + 91 ngày), nên xác nhận bằng tin; ngày xác nhận khác thì chạy lại `plan`
+     - ngày KQKD của từng mã trong shortlist. Ngày từ script có thể là ước tính (nguồn SEC là 8-K KQKD gần nhất + 91 ngày), nên xác nhận bằng tin. Ngày xác nhận khác, hoặc `plan` báo `chưa rõ ngày KQKD`, thì chạy lại `plan` với `--earnings-date YYYY-MM-DD`
      - chất xúc tác từng mã: KQKD vừa công bố (beat/miss, guidance), đơn hàng HBM/AI, sản phẩm mới, M&A, pháp lý
      - giờ sàn cơ sở (giờ VN): Mỹ/ADR 20:30–03:00 khi Mỹ theo giờ mùa hè (Chủ nhật thứ hai tháng 3 đến Chủ nhật đầu tiên tháng 11), còn lại 21:30–04:00; Hàn 07:00–13:30; Hồng Kông 08:30–11:00 và 12:00–15:00; A-share 08:30–10:30 và 12:00–14:00. Ngoài giờ sàn cơ sở thanh khoản mỏng, dễ gap khi mở phiên
 3. **Soi kỹ 3–6 mã, trải ra nhiều ngành.**
    - Tối đa 3 mã cùng một ngành (cột `sector`).
    - Nếu dòng `Tradeable by sector` có mã ngoài bán dẫn/AI (Electronic Technology, Technology Services), phải soi ít nhất 1–2 mã ngoài nhóm đó, chọn mã có xu hướng hoặc chất xúc tác rõ nhất. Tin tức xoay quanh chip không phải lý do để chỉ soi chip.
    - Lệnh: `hunt_stock_data.py detail SYM1 SYM2 ...` (mức giá theo ATR, vị thế nhỏ lẻ và top trader, định giá và tăng trưởng quy USD, bảng quý SEC nếu công ty nộp 10-Q, nến hôm nay, nến 4h).
-   - Kronos-small MC đã **tắt mặc định** và **không được dùng để chấm hạng, hạ hạng hay bỏ lệnh**. Lần kiểm chứng ngày 13/11 so dự báo với kết quả thực tế: dự báo ngày bị kéo về giá trung bình 120 phiên (mã đang ở đỉnh như KO, AAPL, LLY đều bị dự báo giảm sâu), quá tự tin, và đoán chiều kém hơn tung đồng xu. `--kronos` chỉ để thử nghiệm; kết quả của nó không đưa vào báo cáo hay Telegram.
 4. **Dựng setup, chiều nào cũng được:** ưu tiên LONG cổ phiếu tăng trưởng doanh thu/EPS mạnh, hưởng lợi chu kỳ ngành của chính nó (bán dẫn/AI, phần mềm, y tế, tiêu dùng, tài chính, công nghiệp, năng lượng…) đang hồi về hỗ trợ/EMA; ưu tiên SHORT cổ phiếu suy giảm cơ bản, định giá quá cao, hoặc nhỏ lẻ fomo quá nóng khi gãy cấu trúc. Stop đặt ở mức luận điểm sai **và** vượt qua đỉnh/đáy swing gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
    - Dò stop bằng `hunt_stock_data.py stops LONG|SHORT SYM [--span 0.07] [--step 0.005]`, đừng viết script dò riêng. Lệnh này in, cho từng entry tính từ mark, mức stop chặt nhất mà `plan` cho qua. Mục tiêu 1,5R/2R đi kèm chỉ để tham chiếu. `WARN near` là đỉnh/đáy 20 phiên gần ngay sát stop.
-5. **Kiểm từng lệnh ngay trước khi báo:** `hunt_stock_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C] [--horizon-days N]`.
+5. **Kiểm từng lệnh ngay trước khi báo:** `hunt_stock_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C] [--horizon-days N] [--earnings-date YYYY-MM-DD]`.
    - `FAIL` thì sửa mức hoặc bỏ lệnh.
    - Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark.
    - `PASS` thì `plan` in `Hạng tối đa` và 4 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý; Cơ bản & KQKD). Báo cáo dán nguyên văn các dòng này (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu. Không gõ lại con số nào. Độ lệch mark–index và dòng KQKD cũng chép từ output.
    - Lần `plan` cuối của mỗi lệnh đưa vào báo cáo phải thêm `--log`:
      - `LOG: #id`: lệnh mới.
      - `LOG: trùng #id`: lệnh cũ còn hiệu lực, báo cáo ghi "giữ #id".
+     - `LOG: từ chối, sổ đã có 3 lệnh mở`: hủy lệnh chờ yếu nhất (`orders --cancel ID`) rồi chạy lại, hoặc đưa lệnh này vào **Đã loại** với lý do đủ 3 lệnh.
 6. **Lệnh cũ:** chạy `hunt_stock_data.py orders`. Nó đọc sổ lệnh 20 ngày ở `~/.local/share/tho-san-co-phieu/orders.json` và tính trạng thái từ nến Binance. Không lấy lệnh cũ từ file báo cáo.
    - `CHỜ`: quyết định giữ, hủy (`orders --cancel ID`), hoặc thay (hủy trước, rồi `plan --log` lệnh mới).
    - `KHỚP … đang chạy` / `chạm TP` / `chạm stop`: lệnh đã khớp trên giấy. Hỏi người dùng có vào thật không, nêu R hiện tại và mức đóng sớm. `orders --cancel` sẽ từ chối các lệnh này.
    - `HẾT HẠN` / `ĐÃ HỦY`: bỏ qua.
 
-## Báo cáo trên khung chat (tiếng Việt, đúng thứ tự)
-1. Một dòng kết luận: có hay không có lệnh hạng A (vào ngay / lệnh chờ), bao nhiêu lệnh, thuộc những thị trường nào (`US`, `ADR`, `KR`, `HK`, `CN`, `PRE`). Hạng của mỗi lệnh không vượt `Hạng tối đa` mà `plan` in ra.
-2. Bối cảnh vĩ mô (Phố Wall và châu Á): tối đa 5 gạch đầu dòng, mỗi ý có ngày.
-3. Mỗi lệnh vào ngay:
-   - Tiêu đề `### 🟢 LONG SYM [MKT] (R:R x) #id` hoặc `🔴 SHORT`.
-   - 4 dòng `TG:` của `plan`, nguyên văn, bỏ tiền tố; dòng KQKD từ `plan`.
-   - Rồi **Cơ bản & KQKD**, **Kỹ thuật & Vị thế**, **Phản biện**, **Sai nếu**. **Phản biện** chép lại lý do của `Hạng tối đa: B` nếu có.
-4. Lệnh chờ: trình bày như lệnh vào ngay (dòng `TG:` đầu đã ghi `Limit` hay `Stop`), hiệu lực 24 giờ. Lệnh cũ lấy từ `orders` (bước 6), mỗi lệnh một dòng gồm #id, trạng thái, và giữ / hủy / thay hoặc cách quản lý nếu đã khớp.
-5. Đã loại: mỗi mã một dòng kèm lý do (cơ bản, kỹ thuật, dính KQKD, hoặc cờ `ATR`/`PUMP`/`INDEX`).
-6. Quản lý rủi ro: tương quan với Nasdaq/S&P 500/KOSPI/Hang Seng; rủi ro gap khi mở phiên sàn cơ sở; điều kiện đóng sớm.
-7. Nguồn: link các bài báo và dữ liệu BCTC đã dùng.
-8. Một dòng: phân tích tham khảo, không phải lời khuyên đầu tư.
+## Báo cáo trên khung chat (tiếng Việt)
+Báo cáo là đúng khung dưới đây: các mục này, theo thứ tự này. Chữ trong `<...>` là chỗ điền; mục không có gì thì ghi "Không có.". Bối cảnh tối đa 5 dòng, mỗi dòng có ngày. Hạng của mỗi lệnh không vượt `Hạng tối đa` mà `plan` in ra.
+
+```markdown
+**Kết luận:** <có / không có> lệnh hạng A; <n> lệnh vào ngay, <m> lệnh chờ (<thị trường: US, ADR, KR, HK, CN, PRE>), <k> lệnh cũ đang chạy trên giấy.
+
+## Bối cảnh vĩ mô (Phố Wall và châu Á)
+- <dd/mm>: <một ý> (<nguồn>)
+
+## Lệnh vào ngay
+### <dòng TG: đầu của plan, bỏ "TG: "> #<id sổ lệnh>
+<dòng TG: thứ hai, nguyên văn, bỏ "TG: ">
+<dòng TG: thứ ba, nguyên văn, bỏ "TG: ">
+<dòng TG: thứ tư (Cơ bản & KQKD), nguyên văn, bỏ "TG: ">
+- **Cơ bản & KQKD:** <...>
+- **Kỹ thuật & Vị thế:** <...>
+- **Phản biện:** <lý do của `Hạng tối đa: B` nếu có> <...>
+- **Sai nếu:** <mức đóng sớm hoặc hủy>
+
+## Lệnh chờ (hiệu lực 24 giờ)
+<mỗi lệnh trình bày như trên; lệnh cũ còn giữ ghi "giữ #id" thay cho #id mới>
+
+## Lệnh cũ (từ `orders`)
+- #<id> <MÃ> <chiều>, <trạng thái của orders>: <giữ / hủy / thay bằng #id mới, hoặc cách quản lý nếu đã khớp>
+
+## Đã loại
+- <MÃ>: <lý do một câu: cơ bản, kỹ thuật, dính KQKD, hoặc cờ ATR / PUMP / INDEX>
+
+## Quản lý rủi ro
+- <tương quan với Nasdaq, S&P 500, KOSPI, Hang Seng; gap khi sàn cơ sở mở phiên; điều kiện đóng sớm>
+
+## Nguồn
+- <link bài báo và dữ liệu BCTC đã dùng>
+
+_Phân tích tham khảo, không phải lời khuyên đầu tư._
+```
 
 ## Gửi Telegram (mỗi lần săn — bản rút gọn 1 tin nhắn)
 - Bản đầy đủ lưu vào `~/.local/share/tho-san-co-phieu/report-<YYYYmmdd-HHMM>.md` và hiển thị trong khung chat. Không lưu ở `/tmp`, vì WSL khởi động lại là mất.
-- Bản gửi Telegram lưu riêng vào `~/.local/share/tho-san-co-phieu/tg-<YYYYmmdd-HHMM>.md` (**tối đa ~1200–1800 ký tự, gọn trong 1 tin nhắn duy nhất, không dùng bảng Markdown, không kèm danh sách link URL và danh sách mã đã loại**):
+- Bản gửi Telegram lưu riêng vào `~/.local/share/tho-san-co-phieu/tg-<YYYYmmdd-HHMM>.md` (**tối đa ~2500 ký tự, gọn trong 1 tin nhắn duy nhất (Telegram cắt ở 4096), không dùng bảng Markdown, không kèm danh sách link URL và danh sách mã đã loại**):
   - **Dòng đầu:** Kết luận ngắn (số lệnh vào ngay / lệnh chờ).
   - **Bối cảnh Vĩ mô:** tối đa 3 gạch đầu dòng, mỗi dòng 1 câu ngắn kèm ngày.
   - **Mỗi lệnh (vào ngay hoặc chờ):**
@@ -88,7 +113,7 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
     - `• Sai nếu: <mức đóng sớm / hủy lệnh>`
   - **Lệnh cũ** (từ `orders`): mỗi lệnh 1 dòng: #id, giữ / hủy / thay, hoặc đã khớp và đang ở đâu.
   - **Quản trị rủi ro:** 1–2 dòng (tối đa mấy lệnh cùng lúc, rủi ro gap mở phiên / KQKD).
-- Kiểm `wc -m ~/.local/share/tho-san-co-phieu/tg-<...>.md` ≤ 1800 rồi gửi bằng lệnh:
+- Kiểm `wc -m ~/.local/share/tho-san-co-phieu/tg-<...>.md` ≤ 2500 rồi gửi bằng lệnh:
   `hermes send --to telegram --subject "📈 Thợ săn Cổ phiếu <dd/mm HH:MM>" --file ~/.local/share/tho-san-co-phieu/tg-<...>.md`
 - Exit khác 0 thì báo người dùng kèm lỗi, không thử lại liên tục. Người dùng nói "không gửi" thì bỏ bước này.
 
@@ -96,6 +121,8 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
 | Lỗi | Cách đúng |
 |---|---|
 | Giữ lệnh qua ngày KQKD, chỉ gắn nhãn cảnh báo | `plan` FAIL thì rút `--horizon-days` để đóng trước KQKD, hoặc bỏ lệnh |
+| Tin vào ngày KQKD của script khi nó là ước tính, hoặc bỏ qua dòng `chưa rõ ngày KQKD` | Xác nhận ngày bằng tin, rồi chạy lại `plan --earnings-date YYYY-MM-DD` |
+| Mở báo cáo bằng bối cảnh, lặp lại tiêu đề lệnh trên dòng `TG:` đầu, thêm bảng tổng hợp | Dòng đầu là **Kết luận:**; tiêu đề lệnh là dòng `TG:` đầu kèm #id; điền đúng khung ở mục Báo cáo |
 | Tin không ngày, thiếu nhóm vĩ mô hoặc lịch KQKD | Đủ bốn nhóm tin ở bước 2, có ngày |
 | Gọi Exa song song, bị `RATE_LIMITED` | Tuần tự, cách khoảng 15 giây; bị chặn thì đợi `retry_after_seconds` rồi thử lại, tối đa 3 lần |
 | Stop vừa đủ 1 ATR, giá chạy làm còn 0,99 ATR | Chạy lại `plan` với giá mới ngay trước khi báo |
