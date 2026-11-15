@@ -51,8 +51,56 @@ HISTORY = {
 }
 
 
+def _okx_inst(base: str, category: str = "1", ct_val: str = "0.1", min_sz: str = "0.01", lever: str = "50") -> dict:
+    """An OKX /api/v5/public/instruments SWAP row; instCategory 1 = crypto, 3 = stock."""
+    return {"instType": "SWAP", "instId": f"{base}-USDT-SWAP", "instFamily": f"{base}-USDT", "uly": f"{base}-USDT",
+            "settleCcy": "USDT", "ctType": "linear", "ctValCcy": base, "ctMult": "1", "state": "live",
+            "instCategory": category, "ctVal": ct_val, "lotSz": "0.01", "minSz": min_sz, "tickSz": "0.01",
+            "lever": lever, "ruleType": "normal"}
+
+
+def _okx_rows(newest: list[str], rest: list[str]) -> list[list[str]]:
+    """100 daily OKX statistics rows, newest first as the API sends them: [ts, *values]."""
+    t0 = 1_794_672_000_000  # 14/11 16:00 UTC: OKX days start at midnight Hong Kong
+    return [[str(t0 - i * 86_400_000), *(newest if i == 0 else rest)] for i in range(100)]
+
+
+OKX_CROWD = {  # flat history: every day like the one before
+    "/api/v5/rubik/stat/contracts/open-interest-history": _okx_rows(["10", "1", "100"], ["10", "1", "100"]),
+    "/api/v5/rubik/stat/contracts/long-short-account-ratio-contract": _okx_rows(["1.5"], ["1.5"]),
+    "/api/v5/rubik/stat/contracts/long-short-position-ratio-contract-top-trader": _okx_rows(["1.2"], ["1.2"]),
+    "/api/v5/rubik/stat/taker-volume-contract": _okx_rows(["100", "100"], ["100", "100"]),
+}
+
+
+def _fake_okx(monkeypatch, insts: list[dict], marks: dict[str, str] | None = None,
+              coins_24h: dict[str, str] | None = None, crowd: dict | None = None, funding: str = "0.0001") -> None:
+    """OKX public data; a mark is 100 and 24h volume 1,000,000 coins at 100 unless the dicts (by instId) say otherwise."""
+    def get(path: str, **params):
+        if path == "/api/v5/public/instruments":
+            return insts
+        if path == "/api/v5/public/mark-price":
+            return [{"instType": "SWAP", "instId": i["instId"], "markPx": (marks or {}).get(i["instId"], "100"),
+                     "ts": "1794726703347"} for i in insts]
+        if path == "/api/v5/market/tickers":
+            return [{"instType": "SWAP", "instId": i["instId"], "last": "100", "vol24h": "1",
+                     "volCcy24h": (coins_24h or {}).get(i["instId"], "1000000")} for i in insts]
+        if path in OKX_CROWD:
+            return {**OKX_CROWD, **(crowd or {})}[path]
+        if path == "/api/v5/public/funding-rate":
+            return [{"instId": params["instId"], "fundingRate": funding, "fundingTime": "1794729600000"}]
+        if path == "/api/v5/public/funding-rate-history":
+            return [{"instId": params["instId"], "fundingRate": "0.0001", "realizedRate": "0.0001"}] * params["limit"]
+        raise AssertionError(f"unexpected OKX call {path}")
+
+    monkeypatch.setattr(hd.okx_gate, "get", get)
+
+
 def _fake_exchange(monkeypatch, tmp_path, closed_by_symbol: dict[str, int]) -> None:
-    """Binance as seen for these symbols; a contract with N closed candles has N days of history everywhere."""
+    """Binance as seen for these symbols; a contract with N closed candles has N days of history everywhere.
+
+    OKX lists every one of them as a crypto swap at the same price; tests that need otherwise call _fake_okx after.
+    """
     def get(path: str, **params):
         sym = params.get("symbol")
         if path == "/fapi/v1/exchangeInfo":
@@ -67,6 +115,7 @@ def _fake_exchange(monkeypatch, tmp_path, closed_by_symbol: dict[str, int]) -> N
 
     monkeypatch.setattr(hd, "get", get)
     monkeypatch.setattr(hd, "OUT", tmp_path / "market.json")
+    _fake_okx(monkeypatch, [_okx_inst(s.removesuffix("USDT")) for s in closed_by_symbol])
 
 
 def _run(monkeypatch, capsys, *argv: str) -> str:
@@ -304,3 +353,89 @@ def test_get_retries_a_stalled_binance_response(monkeypatch):
 def test_flag_suggests_the_highest_leverage_that_leaves_room_for_a_stop(atr_pct, chg24, want):
     row = {"mmr": 0.025, "atr_pct": atr_pct, "chg24h": chg24, "fund": 0.0001}
     assert hd._tag_row(row, 5)["flag"] == want
+
+
+# --- OKX gate: the user trades on OKX (15/11), so nothing OKX does not take may reach a report ---
+
+@pytest.mark.parametrize("alt, mark, coins_24h, kept", [
+    (None, "100", "1000000", False),  # OKX does not list it (5 of Binance's top 40 on 15/11, DODOX among them)
+    (_okx_inst("ALT", category="3"), "100", "1000000", False),  # BB, ON, QNT: a coin on Binance, a stock on OKX
+    (_okx_inst("ALT"), "97.1", "1000000", False),  # INIT 15/11: 2.9% apart, not the same contract
+    (_okx_inst("ALT"), "100.5", "1000000", True),  # an ordinary gap between two venues
+    (_okx_inst("ALT"), "100", "10000", False),  # $1M a day on OKX, under the $2M floor
+])
+def test_scan_keeps_only_contracts_the_user_can_trade_on_okx(monkeypatch, capsys, tmp_path,
+                                                           alt, mark, coins_24h, kept):
+    _fake_exchange(monkeypatch, tmp_path, {"BTCUSDT": 60, "ALTUSDT": 60})
+    _fake_okx(monkeypatch, [_okx_inst("BTC")] + ([alt] if alt else []),
+              marks={"ALT-USDT-SWAP": mark}, coins_24h={"ALT-USDT-SWAP": coins_24h})
+    out = _run(monkeypatch, capsys, "scan")
+    assert ("ALTUSDT" in out) == kept
+
+
+@pytest.mark.parametrize("argv", [
+    ["plan", "LONG", "ALTUSDT", "--stop", "85", "--target", "125", "--leverage", "2"],
+    ["stops", "LONG", "ALTUSDT"],
+])
+def test_plan_and_stops_refuse_a_contract_okx_does_not_list(monkeypatch, capsys, tmp_path, argv):
+    _fake_exchange(monkeypatch, tmp_path, {"ALTUSDT": 60})
+    _fake_okx(monkeypatch, [])
+    with pytest.raises(SystemExit, match="OKX"):
+        _run(monkeypatch, capsys, *argv)
+
+
+def test_detail_prints_no_analysis_for_a_contract_okx_does_not_list(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"ALTUSDT": 60})
+    _fake_okx(monkeypatch, [])
+    out = _run(monkeypatch, capsys, "detail", "ALTUSDT")
+    assert "OKX" in out
+    assert "ATR14d" not in out
+
+
+def test_plan_sizes_the_order_in_okx_contracts(monkeypatch, capsys, tmp_path):
+    # One OKX contract is 0.1 COIN here (PEPE 10,000,000, BTC 0.01), so a coin count is not what OKX takes.
+    # Risk 10 USDT over a 14 stop = 0.714 COIN = 7.14 contracts.
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75",
+               "--leverage", "2")
+    assert _line(out, "TG: • Size:").startswith("TG: • Size: 7.14 hợp đồng COIN-USDT-SWAP (0.714 COIN")
+
+
+@pytest.mark.parametrize("inst, check", [
+    ({"ct_val": "10", "min_sz": "1"}, "OKX minimum"),  # 0.714 COIN is 0.07 of a 10-COIN contract
+    ({"lever": "1"}, "OKX max leverage"),
+])
+def test_plan_fails_an_order_okx_would_reject(monkeypatch, capsys, tmp_path, inst, check):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    _fake_okx(monkeypatch, [_okx_inst("COIN", **inst)])
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75",
+               "--leverage", "2")
+    assert next(line for line in out.splitlines() if check in line).split()[0] == "FAIL"
+    assert "VERDICT: FAIL" in out
+
+
+def test_detail_shows_the_okx_crowd_over_100_days(monkeypatch, capsys, tmp_path):
+    # Binance keeps 30 days of positioning; OKX keeps 100, and it is the crowd on the venue the user trades.
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    _fake_okx(monkeypatch, [_okx_inst("COIN")], funding="0.0003", crowd={
+        # [contracts, coins, USD]: contracts +20% but USD +10%, so the USD column is the one read
+        "/api/v5/rubik/stat/contracts/open-interest-history": _okx_rows(["12", "1.2", "110"], ["10", "1", "100"]),
+        "/api/v5/rubik/stat/contracts/long-short-account-ratio-contract": _okx_rows(["2"], ["1"]),
+        "/api/v5/rubik/stat/contracts/long-short-position-ratio-contract-top-trader": _okx_rows(["0.5"], ["1"]),
+        "/api/v5/rubik/stat/taker-volume-contract": _okx_rows(["100", "150"], ["100", "100"]),  # [sell, buy]
+    })
+    out = _run(monkeypatch, capsys, "detail", "COINUSDT")
+    line = next(line for line in out.splitlines() if "OKX crowd" in line)
+    assert "OI 1d +10.0% 7d +10.0%" in line
+    assert "L/S 2 (pct100 100)" in line
+    assert "top 0.5 (pct100 1)" in line
+    assert "taker 1d 1.5 3d 1.167" in line
+    assert "funding 0.0300% (avg last 21 0.0100%)" in line
+
+
+def test_okx_error_answer_is_not_read_as_an_empty_market(monkeypatch):
+    # OKX answers an unknown contract with HTTP 200, code 51001 and data []: read as data, the gate drops everything.
+    body = b'{"code":"51001","data":[],"msg":"Instrument ID doesn\'t exist."}'
+    monkeypatch.setattr(hd.okx_gate.urllib.request, "urlopen", lambda request, timeout: io.BytesIO(body))
+    with pytest.raises(RuntimeError, match="51001"):
+        hd.okx_gate.get("/api/v5/public/funding-rate", instId="NOPE-USDT-SWAP")

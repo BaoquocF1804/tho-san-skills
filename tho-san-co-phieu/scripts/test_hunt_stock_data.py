@@ -36,9 +36,45 @@ def _daily_bars(days: int) -> list:
     return bars
 
 
-def _fake_exchange(monkeypatch, bars: list, tv_info: dict | None = None) -> None:
-    symbol = {
-        "symbol": "TESTUSDT", "baseAsset": "TEST", "quoteAsset": "USDT", "status": "TRADING",
+def _okx_stock(base: str) -> dict:
+    """An OKX /api/v5/public/instruments SWAP row for a stock (instCategory 3); one contract is 0.1 share here."""
+    return {"instType": "SWAP", "instId": f"{base}-USDT-SWAP", "instFamily": f"{base}-USDT", "uly": f"{base}-USDT",
+            "settleCcy": "USDT", "ctType": "linear", "ctValCcy": base, "ctMult": "1", "state": "live",
+            "instCategory": "3", "ctVal": "0.1", "lotSz": "0.01", "minSz": "0.01", "tickSz": "0.01",
+            "lever": "20", "ruleType": "normal"}
+
+
+def _fake_okx(monkeypatch, insts: list[dict]) -> None:
+    """OKX at Binance's price with $100M a day, and a flat 100-day crowd."""
+    def rows(*values: str) -> list[list[str]]:
+        return [[str(1_794_672_000_000 - i * 86_400_000), *values] for i in range(100)]
+
+    crowd = {
+        "/api/v5/rubik/stat/contracts/open-interest-history": rows("10", "1", "100"),
+        "/api/v5/rubik/stat/contracts/long-short-account-ratio-contract": rows("1.5"),
+        "/api/v5/rubik/stat/contracts/long-short-position-ratio-contract-top-trader": rows("1.2"),
+        "/api/v5/rubik/stat/taker-volume-contract": rows("100", "100"),
+    }
+
+    def get(path: str, **params):
+        if path == "/api/v5/public/instruments":
+            return insts
+        if path == "/api/v5/public/mark-price":
+            return [{"instType": "SWAP", "instId": i["instId"], "markPx": "100", "ts": "1"} for i in insts]
+        if path == "/api/v5/market/tickers":
+            return [{"instType": "SWAP", "instId": i["instId"], "last": "100", "volCcy24h": "1000000"} for i in insts]
+        if path == "/api/v5/public/funding-rate":
+            return [{"instId": params["instId"], "fundingRate": "0.0001"}]
+        if path == "/api/v5/public/funding-rate-history":
+            return [{"instId": params["instId"], "fundingRate": "0.0001"}] * params["limit"]
+        return crowd[path]
+
+    monkeypatch.setattr(h.okx_gate, "get", get)
+
+
+def _stock(base: str) -> dict:
+    return {
+        "symbol": f"{base}USDT", "baseAsset": base, "quoteAsset": "USDT", "status": "TRADING",
         "contractType": "TRADIFI_PERPETUAL", "underlyingType": "EQUITY",
         "maintMarginPercent": "2.5000", "requiredMarginPercent": "5.0000",
         "filters": [
@@ -47,11 +83,17 @@ def _fake_exchange(monkeypatch, bars: list, tv_info: dict | None = None) -> None
             {"filterType": "MIN_NOTIONAL", "notional": "5"},
         ],
     }
+
+
+def _fake_exchange(monkeypatch, bars: list, tv_info: dict | None = None, bases: tuple[str, ...] = ("TEST",)) -> None:
+    """Binance with these stock contracts on the same candles; OKX lists every one (tests call _fake_okx to change that)."""
+    per_symbol = {
+        "/fapi/v1/premiumIndex": lambda s: {"symbol": s, "markPrice": "100", "indexPrice": "100",
+                                            "lastFundingRate": "0.0001"},
+        "/fapi/v1/ticker/24hr": lambda s: {"symbol": s, "quoteVolume": "50000000", "priceChangePercent": "0.5"},
+    }
     responses = {
-        "/fapi/v1/exchangeInfo": {"symbols": [symbol]},
-        "/fapi/v1/premiumIndex": {"symbol": "TESTUSDT", "markPrice": "100", "indexPrice": "100",
-                                  "lastFundingRate": "0.0001"},
-        "/fapi/v1/ticker/24hr": {"symbol": "TESTUSDT", "quoteVolume": "50000000", "priceChangePercent": "0.5"},
+        "/fapi/v1/exchangeInfo": {"symbols": [_stock(b) for b in bases]},
         "/fapi/v1/klines": bars,  # served for 1d and 4h alike; only the daily maths is asserted
         "/futures/data/openInterestHist": [{"sumOpenInterestValue": "1000000"}] * 30,
         "/futures/data/globalLongShortAccountRatio": [{"longShortRatio": "1.5"}] * 30,
@@ -59,9 +101,16 @@ def _fake_exchange(monkeypatch, bars: list, tv_info: dict | None = None) -> None
         "/futures/data/takerlongshortRatio": [{"buySellRatio": "1.0"}] * 7,
         "/fapi/v1/fundingRate": [{"fundingRate": "0.0001"}] * 21,
     }
-    monkeypatch.setattr(h, "get_binance", lambda path, **params: responses[path])
+    def get_binance(path: str, **params):
+        if path in per_symbol:  # one row for a symbol, every row without one
+            row = per_symbol[path]
+            return row(params["symbol"]) if "symbol" in params else [row(f"{b}USDT") for b in bases]
+        return responses[path]
+
+    monkeypatch.setattr(h, "get_binance", get_binance)
     monkeypatch.setattr(h, "fetch_tv_fundamentals_batch", lambda bases: {"TEST": tv_info} if tv_info else {})
     monkeypatch.setattr(h, "load_sec_tickers", lambda: {})
+    _fake_okx(monkeypatch, [_okx_stock(b) for b in bases])
 
 
 def _plan(monkeypatch, capsys, *argv: str) -> str:
@@ -93,7 +142,7 @@ def test_scan_features_measure_atr_on_weekday_bars(monkeypatch):
     _fake_exchange(monkeypatch, _daily_bars(68))
     meta = h.equity_symbol_meta(h.get_binance("/fapi/v1/exchangeInfo"))["TESTUSDT"]
     ticker = {"quoteVolume": "50000000", "priceChangePercent": "0.5"}
-    row = h.features("TESTUSDT", meta, ticker, h.get_binance("/fapi/v1/premiumIndex"), None, {})
+    row = h.features("TESTUSDT", meta, ticker, h.get_binance("/fapi/v1/premiumIndex", symbol="TESTUSDT"), None, {})
     assert row["atr"] == pytest.approx(4.0)
 
 
@@ -526,3 +575,58 @@ def test_news_marks_6k_filings_to_open(monkeypatch, capsys):
     out = _news(monkeypatch, capsys, {"form": ["6-K"], "filingDate": [filed], "items": [""],
                                       "accessionNumber": ["0000456-26-000001"], "primaryDocument": ["f6k.htm"]})
     assert f"[{filed}] 6-K ?" in out
+
+
+# --- OKX gate: the user trades on OKX (15/11); OKX lists 186 of Binance's 227 stock perps ---
+
+@pytest.mark.parametrize("argv", [
+    ["plan", "LONG", "TEST", "--stop", "95", "--target", "110"],
+    ["stops", "LONG", "TEST"],
+])
+def test_plan_and_stops_refuse_a_stock_okx_does_not_list(monkeypatch, capsys, argv):
+    # Tencent, Meituan, BYD, BABA, ANET, UBER trade on Binance only (15/11)
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    _fake_okx(monkeypatch, [])
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", *argv])
+    with pytest.raises(SystemExit, match="OKX"):
+        h.main()
+
+
+def test_detail_prints_no_analysis_for_a_stock_okx_does_not_list(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    _fake_okx(monkeypatch, [])
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "detail", "TEST"])
+    h.main()
+    out = capsys.readouterr().out
+    assert "OKX" in out
+    assert "ATR14d" not in out
+
+
+def test_plan_sizes_a_stock_order_in_okx_contracts(monkeypatch, capsys):
+    # Risk 10 USDT over a 5 stop = 2 shares = 20 contracts of 0.1 share.
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    out = _plan(monkeypatch, capsys, "--stop", "95", "--target", "110")
+    size = next(line for line in out.splitlines() if line.startswith("TG: • Size:"))
+    assert size.startswith("TG: • Size: 20 hợp đồng TEST-USDT-SWAP (2 TEST")
+
+
+def test_detail_prints_the_okx_contract_and_crowd(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "detail", "TEST"])
+    h.main()
+    out = capsys.readouterr().out
+    assert "OKX TEST-USDT-SWAP" in out
+    assert "OKX crowd 100d" in out
+
+
+def test_scan_keeps_only_stocks_on_okx_and_still_measures_against_spy(monkeypatch, capsys, tmp_path):
+    # SPY is the relative-strength yardstick, not a trade: OKX not listing it must not blank rsSPY for every row.
+    _fake_exchange(monkeypatch, _daily_bars(68), bases=("TEST", "OTHER", "SPY"))
+    _fake_okx(monkeypatch, [_okx_stock("TEST")])
+    monkeypatch.setattr(h, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(h, "OUT", tmp_path / "market.json")
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "scan"])
+    h.main()
+    rows = json.loads((tmp_path / "market.json").read_text())["rows"]
+    assert [r["symbol"] for r in rows] == ["TESTUSDT"]
+    assert rows[0]["rs20_vs_spy"] == 0.0  # same candles as SPY

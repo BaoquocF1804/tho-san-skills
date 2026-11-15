@@ -5,6 +5,7 @@
 !/tho-san-co-phieu/
 !/tho-san-swing/
 !/macro_events.json
+!/okx_gate.py
 __pycache__/
 .ruff_cache/
 .pytest_cache/

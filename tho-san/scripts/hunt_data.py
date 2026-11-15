@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Binance USDⓈ-M public market data for a manual futures hunt (stdlib only, no API keys).
 
+Orders go on OKX: every command keeps only contracts OKX lists under the same name at a mark within 1%
+(okx_gate.py at the skills repo root), plan sizes in OKX contracts, detail adds OKX's own 100-day crowd.
+
   python3 hunt_data.py scan [--top 40] [--leverage 5] [--workers 6]
       universe table (top perpetuals by volume) + ~/.local/share/tho-san/market.json; flag OKxN means the ATR
       only leaves room for a stop at leverage N, so stops/plan take --leverage N
@@ -33,7 +36,11 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, Decimal
 from pathlib import Path
+import sys
 from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # skills repo root, shared with tho-san-co-phieu
+import okx_gate  # noqa: E402
 
 BASE = "https://fapi.binance.com"
 OUT = Path.home() / ".local/share/tho-san/market.json"  # /tmp is emptied on every WSL restart
@@ -165,6 +172,7 @@ def symbol_meta(info) -> dict[str, dict]:
                 and s.get("baseAsset") not in EXCLUDED_BASES):
             f = {x["filterType"]: x for x in s["filters"]}
             meta[s["symbol"]] = {
+                "base_asset": s["baseAsset"],
                 "tick": f["PRICE_FILTER"]["tickSize"],
                 "step": f["LOT_SIZE"]["stepSize"],
                 "min_qty": f["LOT_SIZE"]["minQty"],
@@ -267,7 +275,9 @@ def scan(args) -> None:
     meta = symbol_meta(get("/fapi/v1/exchangeInfo"))
     tickers = {t["symbol"]: t for t in get("/fapi/v1/ticker/24hr") if t["symbol"] in meta}
     premium = {p["symbol"]: p for p in get("/fapi/v1/premiumIndex") if p["symbol"] in meta}
-    universe = sorted((s for s, t in tickers.items() if float(t["quoteVolume"]) >= args.min_qv),
+    meta = okx_gate.on_okx(meta, {s: float(p["markPrice"]) for s, p in premium.items()},
+                           okx_gate.swaps(okx_gate.CRYPTO), args.okx_min_qv)
+    universe = sorted((s for s, t in tickers.items() if s in meta and float(t["quoteVolume"]) >= args.min_qv),
                       key=lambda s: -float(tickers[s]["quoteVolume"]))[:args.top]
     btc_row = _tag_row(features("BTCUSDT", meta["BTCUSDT"], tickers["BTCUSDT"], premium["BTCUSDT"], None),
                        args.leverage)
@@ -287,7 +297,8 @@ def scan(args) -> None:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps({"generated_at": datetime.now(timezone.utc).isoformat(),
                                "leverage": args.leverage, "rows": rows}, indent=1))
-    print(f"{len(rows)} contracts: OK = room for a stop at x{args.leverage}, OKxN = ATR too wide for"
+    print(f"{len(rows)} contracts the user can trade on OKX (same name, mark within {okx_gate.MAX_GAP:.0%}, OKX 24h"
+          f" >= ${args.okx_min_qv / 1e6:g}M): OK = room for a stop at x{args.leverage}, OKxN = ATR too wide for"
           f" x{args.leverage}, run stops/plan with --leverage N (risk stays 1%), ATR = too volatile even at x2,"
           f" PUMP = today's move/funding not in the ATR. Saved {OUT}")
     print(f"{'sym':<14}{'flag':>5}{'mark':>11}{'24h':>6}{'7d':>7}{'20d':>7}{'rsBTC':>7}{'>e20':>5}"
@@ -309,14 +320,20 @@ def scan(args) -> None:
 
 def detail(args) -> None:
     meta = symbol_meta(get("/fapi/v1/exchangeInfo"))
+    okx = okx_gate.swaps(okx_gate.CRYPTO)
     g = lambda x: "-" if x is None else f"{x:.6g}"  # noqa: E731
     for sym in (s.upper() for s in args.symbols):
         if sym not in meta:
             print(f"\n### {sym}: not a TRADING crypto USDT perpetual on Binance USDⓈ-M"
                   " (stablecoins and gold are left out)")
             continue
+        premium = get("/fapi/v1/premiumIndex", symbol=sym)
+        on_okx = okx_gate.on_okx({sym: meta[sym]}, {sym: float(premium["markPrice"])}, okx).get(sym)
+        if on_okx is None:
+            print(f"\n### {okx_gate.missing(sym)}")
+            continue
         ticker = get("/fapi/v1/ticker/24hr", symbol=sym)
-        r = features(sym, meta[sym], ticker, get("/fapi/v1/premiumIndex", symbol=sym), None)
+        r = features(sym, on_okx, ticker, premium, None)
         a, m = r["atr"], r["mark"]
         print(f"\n### {sym} mark {g(m)} | ATR14d {g(a)} ({fmt(r['atr_pct'])}%) | EMA20 {g(r['ema20'])} "
               f"EMA50 {g(r['ema50'])} EMA200 {g(r['ema200'])} | 4h EMA20 {g(r['ema20_4h'])} "
@@ -329,6 +346,8 @@ def detail(args) -> None:
         print(f"  OI 1d {r['oi_chg1d']}% 7d {r['oi_chg7d']}% | L/S {g(r['ls'])} (pct30 {r['ls_pct30']})"
               f" | top {g(r['top'])} (pct30 {r['top_pct30']}) | taker 1d {r['taker1d']} 3d {r['taker3d']}"
               f" | funding {r['fund'] * 100:.4f}% (avg last 21 {fmt((r['fund_avg'] or 0) * 100, 4)}%)")
+        print("  " + okx_gate.venue(on_okx))
+        print(okx_gate.crowd(on_okx))
         print(f"  tick {r['tick']} step {r['step']} min_notional {r['min_notional']} mmr {r['mmr']:.4f}")
         print("  last closed days (date o/h/l/c):", " ".join(
             f"{k[0]} {g(k[1])}/{g(k[2])}/{g(k[3])}/{g(k[4])}" for k in r["last5_daily"]))
@@ -350,6 +369,9 @@ def plan(args) -> None:
         raise SystemExit(f"{sym} is not a TRADING crypto USDT perpetual on Binance USDⓈ-M"
                          " (stablecoins and gold are left out)")
     mark = float(get("/fapi/v1/premiumIndex", symbol=sym)["markPrice"])
+    meta = okx_gate.on_okx({sym: meta}, {sym: mark}, okx_gate.swaps(okx_gate.CRYPTO)).get(sym)
+    if meta is None:
+        raise SystemExit(okx_gate.missing(sym))
     k1d = get("/fapi/v1/klines", symbol=sym, interval="1d", limit=260)
     a, veto, watch = stop_levels(k1d)  # closed days: same ATR as scan/detail
     if a is None:
@@ -383,22 +405,27 @@ def plan(args) -> None:
         f"stop >= {STOP_CLEARANCE_ATR} ATR from daily highs/lows"
         + (f" (too close: {', '.join(f'{x:.6g}' for x in near)})" if near else ""): not near,
     }
-    step, min_qty = Decimal(meta["step"]), Decimal(meta["min_qty"])
+    # OKX takes whole lots of contracts, and one contract is ct_val coins (BTC 0.01, ETH 0.1, DOGE 1000)
+    ct_val, lot, base = Decimal(meta["ct_val"]), Decimal(meta["lot_sz"]), meta["base_asset"]
     raw = min(args.capital * args.risk / risk_unit, args.capital * args.margin_cap * args.leverage / entry)
-    qty = (Decimal(str(raw)) / step).to_integral_value(rounding=ROUND_FLOOR) * step
+    contracts = (Decimal(str(raw)) / ct_val / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
+    qty = contracts * ct_val
     notional = float(qty) * entry
-    checks[f"size >= exchange minimum (qty {meta['min_qty']}, notional {meta['min_notional']})"] = (
-        qty >= min_qty and notional >= float(meta["min_notional"]))
+    checks[f"size >= OKX minimum ({meta['min_sz']} contracts of {meta['ct_val']} {base})"] = (
+        contracts >= Decimal(meta["min_sz"]))
+    checks[f"x{args.leverage} <= OKX max leverage x{meta['okx_max_lev']}"] = args.leverage <= meta["okx_max_lev"]
     liq = entry * (1 - 1 / args.leverage + meta["mmr"]) if side == "LONG" else entry * (
         1 + 1 / args.leverage - meta["mmr"])
     print(f"{side} {sym} x{args.leverage} | mark {mark:.6g} | ATR14d {a:.6g} ({a / mark * 100:.2f}%)"
           f" | {order}")
+    print(okx_gate.venue(meta))
     if note:
         print(note)
     print(f"entry {entry:.6g}  stop {args.stop:.6g} ({(args.stop / entry - 1) * 100:+.2f}%,"
           f" {risk_unit / a:.2f} ATR)  target {args.target:.6g} ({(args.target / entry - 1) * 100:+.2f}%)"
           f"  R:R {reward_unit / risk_unit:.2f} (net ~{net_rr:.2f})")
-    print(f"size {qty.normalize():f} (step {meta['step']}) notional {notional:.2f} margin "
+    print(f"size {contracts.normalize():f} contracts {meta['okx']} = {qty.normalize():f} {base}"
+          f" notional {notional:.2f} margin "
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
     for name, ok in checks.items():
@@ -431,7 +458,8 @@ def plan(args) -> None:
         print(f"TG: • Vào: {entry:.10g} | Stop: {args.stop:.10g} ({(args.stop / entry - 1) * 100:+.2f}%,"
               f" {risk_unit / a:.2f} ATR) | TP: {args.target:.10g} ({(args.target / entry - 1) * 100:+.2f}%)"
               f" | R:R: {reward_unit / risk_unit:.2f}")
-        print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f} (x{args.leverage})"
+        print(f"TG: • Size: {contracts.normalize():f} hợp đồng {meta['okx']} ({qty.normalize():f} {base}"
+              f" ≈ {notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f} (x{args.leverage})"
               f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
         if order != "lệnh chờ (stop)":  # the desk cannot grade stop entries yet
             print(f"DESK: ~/crypto-desk-rewrite/scripts/desk log-call {side} {sym}"
@@ -446,6 +474,8 @@ def stops(args) -> None:
         raise SystemExit(f"{sym} is not a TRADING crypto USDT perpetual on Binance USDⓈ-M"
                          " (stablecoins and gold are left out)")
     mark = float(get("/fapi/v1/premiumIndex", symbol=sym)["markPrice"])
+    if not okx_gate.on_okx({sym: meta}, {sym: mark}, okx_gate.swaps(okx_gate.CRYPTO)):
+        raise SystemExit(okx_gate.missing(sym))
     a, veto, watch = stop_levels(get("/fapi/v1/klines", symbol=sym, interval="1d", limit=260))
     if a is None:
         raise SystemExit(f"{sym}: fewer than 15 closed daily candles, so no ATR14 yet — skip this contract")
@@ -473,6 +503,7 @@ def main() -> None:
     p = sub.add_parser("scan")
     p.add_argument("--top", type=int, default=40)
     p.add_argument("--min-qv", type=float, default=20_000_000)
+    p.add_argument("--okx-min-qv", type=float, default=2_000_000, help="24h USDT volume on OKX, where orders go")
     p.add_argument("--leverage", type=int, default=5)
     p.add_argument("--workers", type=int, default=6)
     p = sub.add_parser("detail")

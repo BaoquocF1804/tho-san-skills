@@ -8,6 +8,8 @@ Supports all stock perpetual categories on Binance USDⓈ-M; the market tag foll
   - China A-shares (CN_EQUITY: UNITREE, CXMT)
   - Pre-IPO (PREMARKET: OPENAI, ANTHROPIC, MOONSHOT, OURA)
 Daily and 4h indicators skip Sat/Sun candles: the perps trade 24/7 but barely move while the exchanges are shut.
+Orders go on OKX: every command keeps only stocks OKX lists under the same name at a mark within 1%
+(okx_gate.py at the skills repo root), plan sizes in OKX contracts, detail adds OKX's own 100-day crowd.
 
 Commands:
   python3 hunt_stock_data.py scan [--top 0] [--min-qv 1000000] [--market all|us|kr|hk|cn|adr|pre] [--leverage 5]
@@ -44,6 +46,7 @@ import http.client
 import json
 import os
 from pathlib import Path
+import sys
 import threading
 import time
 import urllib.error
@@ -51,6 +54,9 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # skills repo root, shared with tho-san
+import okx_gate  # noqa: E402
 
 BASE = "https://fapi.binance.com"
 TV_SCAN_URL = "https://scanner.tradingview.com/global/scan"
@@ -975,6 +981,10 @@ def scan(args) -> None:
         if len(spy_c) > 21:
             spy_chg20 = (spy_c[-1] / spy_c[-21] - 1) * 100
 
+    # after SPY: the yardstick is no trade, so OKX not listing it is fine
+    meta = okx_gate.on_okx(meta, {s: float(p["markPrice"]) for s, p in premium.items()},
+                           okx_gate.swaps(okx_gate.STOCK), args.okx_min_qv)
+    tickers = {s: t for s, t in tickers.items() if s in meta}
     all_bases = sorted({m["base_asset"] for m in meta.values()})
     tv_map = fetch_tv_fundamentals_batch(all_bases)
     sec_map = load_sec_tickers()
@@ -1008,8 +1018,9 @@ def scan(args) -> None:
     }, indent=1))
 
     etf_note = "ETFs included" if args.include_etfs else "ETFs excluded"
-    print(f"{len(rows)} global equity perpetuals (market={market_filter}, {etf_note}, 24h volume >= "
-          f"{args.min_qv / 1e6:g}M{f', top {args.top}' if args.top else ''}): OK = tradeable at x{args.leverage},"
+    print(f"{len(rows)} global equity perpetuals the user can trade on OKX (market={market_filter}, {etf_note},"
+          f" 24h volume >= {args.min_qv / 1e6:g}M, OKX same name, mark within {okx_gate.MAX_GAP:.0%}, OKX 24h >="
+          f" {args.okx_min_qv / 1e6:g}M{f', top {args.top}' if args.top else ''}): OK = tradeable at x{args.leverage},"
           f" OKxN = ATR too wide for x{args.leverage}, run stops/plan with --leverage N (risk stays 1%),"
           f" ATR = too volatile even at x2, PUMP = extreme move/funding, INDEX = mark/index >0.5%. Saved {OUT}")
     print(f"{'sym':<14}{'mkt':<4}{'sector':<13}{'flag':>5}{'mark':>9}{'24h':>6}{'7d':>6}{'20d':>6}{'rsSPY':>6}"
@@ -1046,11 +1057,17 @@ def detail(args) -> None:
         req_syms.append(sym)
     valid_bases = [meta[s]["base_asset"] for s in req_syms if s in meta]
     tv_map = fetch_tv_fundamentals_batch(valid_bases) if valid_bases else {}
+    okx = okx_gate.swaps(okx_gate.STOCK)
     g = lambda x: "-" if x is None else f"{x:.6g}"  # noqa: E731
 
     for sym in req_syms:
         if sym not in meta:
             print(f"\n### {sym}: not a TRADING stock USDT perpetual on Binance USDⓈ-M")
+            continue
+        premium = get_binance("/fapi/v1/premiumIndex", symbol=sym)
+        on_okx = okx_gate.on_okx({sym: meta[sym]}, {sym: float(premium["markPrice"])}, okx).get(sym)
+        if on_okx is None:
+            print(f"\n### {okx_gate.missing(sym)}")
             continue
         base = meta[sym]["base_asset"].upper()
         utype = meta[sym]["underlying_type"]
@@ -1058,7 +1075,7 @@ def detail(args) -> None:
         sec_info = fetch_sec_fundamentals(base, sec_map)
         fnd = build_fundamental_summary(base, utype, tv_info, sec_info)
         ticker = get_binance("/fapi/v1/ticker/24hr", symbol=sym)
-        r = features(sym, meta[sym], ticker, get_binance("/fapi/v1/premiumIndex", symbol=sym), None, fnd)
+        r = features(sym, on_okx, ticker, premium, None, fnd)
         a, m = r["atr"], r["mark"]
         print(f"\n### {sym} [{fnd['market']} / {fnd['exchange']}] — {fnd['company_name']} ({fnd['sector']})")
         print(f"  mark {g(m)} | index {g(r['index_price'])} (dev {r['mark_index_dev_pct']:.3f}%) "
@@ -1073,6 +1090,8 @@ def detail(args) -> None:
         print(f"  OI 1d {r['oi_chg1d']}% 7d {r['oi_chg7d']}% | L/S {g(r['ls'])} (pct30 {r['ls_pct30']})"
               f" | top {g(r['top'])} (pct30 {r['top_pct30']}) | taker 1d {r['taker1d']} 3d {r['taker3d']}"
               f" | funding {r['fund'] * 100:.4f}% (avg last 21 {fmt((r['fund_avg'] or 0) * 100, 4)}%)")
+        print("  " + okx_gate.venue(on_okx))
+        print(okx_gate.crowd(on_okx))
         print(f"  tick {r['tick']} step {r['step']} min_notional {r['min_notional']} mmr {r['mmr']:.4f}")
 
         # Global Fundamentals (TradingView + SEC EDGAR)
@@ -1254,6 +1273,9 @@ def plan(args) -> None:
 
     prem = get_binance("/fapi/v1/premiumIndex", symbol=sym)
     mark = float(prem["markPrice"])
+    meta = okx_gate.on_okx({sym: meta}, {sym: mark}, okx_gate.swaps(okx_gate.STOCK)).get(sym)
+    if meta is None:
+        raise SystemExit(okx_gate.missing(sym))
     index_price = float(prem.get("indexPrice") or mark)
     mark_index_dev = abs(mark - index_price) / index_price if index_price else 0.0
     k1d = get_binance("/fapi/v1/klines", symbol=sym, interval="1d", limit=370)
@@ -1300,23 +1322,28 @@ def plan(args) -> None:
         f"no earnings within the {args.horizon_days}-day holding window (next {fnd.get('next_earnings_date') or '-'})": (
             d_to is None or not 0 <= d_to <= args.horizon_days),
     }
-    step, min_qty = Decimal(meta["step"]), Decimal(meta["min_qty"])
+    # OKX takes whole lots of contracts, and one contract is ct_val shares
+    ct_val, lot = Decimal(meta["ct_val"]), Decimal(meta["lot_sz"])
     raw = min(args.capital * args.risk / risk_unit, args.capital * args.margin_cap * args.leverage / entry)
-    qty = (Decimal(str(raw)) / step).to_integral_value(rounding=ROUND_FLOOR) * step
+    contracts = (Decimal(str(raw)) / ct_val / lot).to_integral_value(rounding=ROUND_FLOOR) * lot
+    qty = contracts * ct_val
     notional = float(qty) * entry
-    checks[f"size >= exchange minimum (qty {meta['min_qty']}, notional {meta['min_notional']})"] = (
-        qty >= min_qty and notional >= float(meta["min_notional"]))
+    checks[f"size >= OKX minimum ({meta['min_sz']} contracts of {meta['ct_val']} {base})"] = (
+        contracts >= Decimal(meta["min_sz"]))
+    checks[f"x{args.leverage} <= OKX max leverage x{meta['okx_max_lev']}"] = args.leverage <= meta["okx_max_lev"]
     liq = entry * (1 - 1 / args.leverage + meta["mmr"]) if side == "LONG" else entry * (
         1 + 1 / args.leverage - meta["mmr"])
 
     print(f"{side} {sym} [{fnd['market']}] ({fnd['company_name']}) x{args.leverage} | mark {mark:.6g} "
           f"| index {index_price:.6g} (dev {mark_index_dev * 100:.3f}%) | ATR14d {a:.6g} ({a / mark * 100:.2f}%) | {order}")
+    print(okx_gate.venue(meta))
     if note:
         print(note)
     print(f"entry {entry:.6g}  stop {args.stop:.6g} ({(args.stop / entry - 1) * 100:+.2f}%,"
           f" {risk_unit / a:.2f} ATR)  target {args.target:.6g} ({(args.target / entry - 1) * 100:+.2f}%)"
           f"  R:R {reward_unit / risk_unit:.2f} (net ~{net_rr:.2f})")
-    print(f"size {qty.normalize():f} (step {meta['step']}) notional {notional:.2f} margin "
+    print(f"size {contracts.normalize():f} contracts {meta['okx']} = {qty.normalize():f} {base}"
+          f" notional {notional:.2f} margin "
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
     d_since = fnd.get("days_since_earnings")
@@ -1359,7 +1386,8 @@ def plan(args) -> None:
         print(f"TG: • Vào: {entry:.10g} | Stop: {args.stop:.10g} ({(args.stop / entry - 1) * 100:+.2f}%,"
               f" {risk_unit / a:.2f} ATR) | TP: {args.target:.10g} ({(args.target / entry - 1) * 100:+.2f}%)"
               f" | R:R: {reward_unit / risk_unit:.2f}")
-        print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f} (x{args.leverage})"
+        print(f"TG: • Size: {contracts.normalize():f} hợp đồng {meta['okx']} ({qty.normalize():f} {base}"
+              f" ≈ {notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f} (x{args.leverage})"
               f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
         print(f"TG: • Cơ bản & KQKD: Rev YoY {'-' if rev is None else f'{rev:+.1f}%'}, P/E {fmt(pe, 1)}"
               f" | KQKD: {fnd.get('next_earnings_date') or '-'}{'' if d_to is None else f' (còn ~{d_to}d)'}")
@@ -1378,6 +1406,8 @@ def stops(args) -> None:
     if meta is None:
         raise SystemExit(f"{sym} is not a TRADING stock USDT perpetual on Binance USDⓈ-M")
     mark = float(get_binance("/fapi/v1/premiumIndex", symbol=sym)["markPrice"])
+    if not okx_gate.on_okx({sym: meta}, {sym: mark}, okx_gate.swaps(okx_gate.STOCK)):
+        raise SystemExit(okx_gate.missing(sym))
     a, veto, watch = stop_levels(get_binance("/fapi/v1/klines", symbol=sym, interval="1d", limit=370))
     if a is None:
         raise SystemExit(f"{sym}: fewer than 15 weekday candles, so no ATR14 yet — skip this contract")
@@ -1440,6 +1470,7 @@ def main() -> None:
     p = sub.add_parser("scan")
     p.add_argument("--top", type=int, default=0, help="cap on contracts scanned, 0 = every liquid one")
     p.add_argument("--min-qv", type=float, default=1_000_000)
+    p.add_argument("--okx-min-qv", type=float, default=500_000, help="24h USDT volume on OKX, where orders go")
     p.add_argument("--market", choices=["all", "us", "kr", "hk", "cn", "adr", "pre"], default="all")
     p.add_argument("--include-etfs", action="store_true")
     p.add_argument("--leverage", type=int, default=5)
