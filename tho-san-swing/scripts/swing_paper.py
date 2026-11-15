@@ -9,7 +9,7 @@ Paper only: nothing here places an order. Fills are taken afterwards from real B
 from __future__ import annotations
 
 import argparse
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import json
 from pathlib import Path
 import statistics
@@ -25,7 +25,8 @@ HOME = Path.home() / ".local/share/tho-san-swing"   # not /tmp: WSL wipes /tmp o
 LEDGER = HOME / "ledger.json"
 NY = ZoneInfo("America/New_York")
 FEE, SLIP = 0.0005, 0.0002   # Binance taker and slippage, per side (as in the backtest)
-SLOTS, WEIGHT = 10, 0.05     # per sleeve: 10 positions of 5% equity; two sleeves = the 50/50 mix
+SLOTS, WEIGHT = 10, 0.075    # per sleeve: 10 positions of 7.5% equity, up to 150% for both sleeves (user's pick
+                             # 11/2026: in the backtest return and drawdown grow x1.5, Sharpe stays; swing.py upgrade2)
 TURTLE_IN, TURTLE_OUT = 20, 10  # 11/2026 upgrade: 20/10 beat 55/20 in all four backtest periods (swing.py upgrade)
 MIN_QV = 1_000_000           # median daily quote volume, USDT
 NOT_STOCKS = {"UVXY"}        # ETP the TradingView lookup misses
@@ -106,20 +107,22 @@ def close_position(L: dict, p: dict, fill: float, when: date, reason: str, mk) -
 
 
 def turtle_session(L: dict, d: date, mk) -> list[str]:
-    """Stop orders resting from the last close through session d's close: entries above the watch levels
-    (the prior TURTLE_IN-session high), exits at each open position's stop. Earliest trigger first; SLOTS cap."""
+    """Stop orders during session d (09:30–16:00 NY): entries above the watch levels (the prior TURTLE_IN-session
+    high), exits at each open position's stop. Earliest 15m bar first; inside a bar, exits free slots before
+    entries and entries rank by breakout strength (h - level) / N; SLOTS cap."""
     events, cand = [], []
     for sym, w in L["watch"].items():
         if find(L, "turtle", sym):
             continue
-        hit = next(((t, max(w["level"], o)) for t, o, h, l, c in mk.bars15(sym, d) if h > w["level"]), None)
+        hit = next(((t, max(w["level"], o), -(h - w["level"]) / w["N"])
+                    for t, o, h, l, c in mk.bars15(sym, d) if h > w["level"]), None)
         if hit:
-            cand.append((hit[0], "entry", sym, hit[1], w))
+            cand.append((hit[0], 1, hit[2], "entry", sym, hit[1], w))
     for p in [p for p in L["positions"] if p["sleeve"] == "turtle"]:
         hit = next(((t, min(p["stop"], o)) for t, o, h, l, c in mk.bars15(p["sym"], d) if l <= p["stop"]), None)
         if hit:
-            cand.append((hit[0], "exit", p["sym"], hit[1], p))
-    for t, kind, sym, px, x in sorted(cand, key=lambda e: e[0]):
+            cand.append((hit[0], 0, 0.0, "exit", p["sym"], hit[1], p))
+    for t, _, _, kind, sym, px, x in sorted(cand, key=lambda e: e[:3]):
         if kind == "exit":
             if x in L["positions"]:
                 c = close_position(L, x, px * (1 - SLIP), d, "turtle-exit", mk)
@@ -146,6 +149,10 @@ def process_session(L: dict, d: date, mk, universe: list[str]) -> list[str]:
     if L["last_session"] and d.isoformat() <= L["last_session"]:
         return []
     events = []
+    for o in [o for o in L["orders"] if o["side"] == "buy" and o["sym"] not in universe]:
+        L["orders"].remove(o)
+        events.append(f"Hủy lệnh mua {o['sym']}: mã đã rời danh sách (giá Binance lệch Yahoo hoặc thiếu thanh khoản)")
+    L["watch"] = {s: w for s, w in L["watch"].items() if s in universe}
     for o in [o for o in L["orders"] if o["signal_date"] < d.isoformat()]:
         L["orders"].remove(o)
         px = mk.open_price(o["sym"], d)
@@ -249,10 +256,9 @@ class LiveMarket:
         return float(k[0][1]) if k and k[0][0] == ny_ms(d, 9, 30) else None
 
     def bars15(self, sym, d):
-        """Perp 15m bars from the previous session's close to d's close: stop orders rest 24/7."""
+        """Perp 15m bars inside the regular US session d (09:30–16:00 NY), matching Yahoo's daily High/Low."""
         if (sym, d) not in self.k15:
-            prev = [b[0] for b in (self.daily(sym) or []) if b[0] < d]
-            s, end, out = ny_ms(prev[-1] if prev else d - timedelta(days=1), 16, 0), ny_ms(d, 16, 0), []
+            s, end, out = ny_ms(d, 9, 30), ny_ms(d, 16, 0), []
             while s < end:
                 k = get_binance("/fapi/v1/klines", symbol=f"{sym}USDT", interval="15m", startTime=s, endTime=end - 1, limit=1500)
                 out += [(x[0], float(x[1]), float(x[2]), float(x[3]), float(x[4])) for x in k]
@@ -268,8 +274,19 @@ class LiveMarket:
         return sum(float(x["fundingRate"]) for x in k)
 
 
+def same_price(binance_1d: list, yahoo_bars: list, tol: float = 0.05) -> bool:
+    """True when the perp tracks the stock Yahoo shows under that ticker: the median ratio of closes stays
+    within tol over the days both have (a Binance UTC day closes at 19:00/20:00 New York, hence the slack).
+    Signals and marks come from Yahoo while fills come from Binance, so a mismatch fakes huge P&L (STXX: 31.7x)."""
+    yc = {b[0]: b[4] for b in yahoo_bars}
+    ratios = [float(x[4]) / yc[d] for x in binance_1d
+              if (d := datetime.fromtimestamp(x[0] / 1000, timezone.utc).date()) in yc and yc[d]]
+    return len(ratios) >= 5 and abs(statistics.median(ratios) - 1) <= tol
+
+
 def universe() -> list[str]:
-    """US stock perps on Binance (EQUITY = US-listed incl. ADRs), no ETFs, >= 1M USDT median daily volume."""
+    """US stock perps on Binance (EQUITY = US-listed incl. ADRs), no ETFs, >= 1M USDT median daily volume,
+    and priced like the Yahoo stock of the same ticker."""
     f = HOME / "universe.json"
     if f.exists() and time.time() - f.stat().st_mtime < 20 * 3600:
         return json.loads(f.read_text())
@@ -284,7 +301,7 @@ def universe() -> list[str]:
         if r.get("is_etf") or r.get("subtype") == "preferred":
             continue
         k = get_binance("/fapi/v1/klines", symbol=f"{b}USDT", interval="1d", limit=21)[:-1]
-        if len(k) >= 15 and statistics.median(float(x[7]) for x in k) >= MIN_QV:
+        if len(k) >= 15 and statistics.median(float(x[7]) for x in k) >= MIN_QV and same_price(k, yahoo_daily(b) or []):
             keep.append(b)
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(json.dumps(sorted(keep)))
@@ -303,7 +320,7 @@ def report(L: dict, events: list[str], new_sessions: int | None) -> None:
     marks = L.get("marks", {})
     head = (f"Vốn giấy {eq:.2f} USDT ({eq / L['capital'] - 1:+.2%} từ {vn(L['start'])}); giữ đều các mã cùng kỳ "
             f"{h.get('bench', 0.0):+.2%}. Vị thế mở: RSI2 {n['rsi2']}/{SLOTS}, Turtle {n['turtle']}/{SLOTS}.")
-    orders = [f"MUA {o['sym']} (RSI2 {o['rsi']:.1f}), khoảng {WEIGHT:.0%} vốn" if o["side"] == "buy"
+    orders = [f"MUA {o['sym']} (RSI2 {o['rsi']:.1f}), khoảng {WEIGHT:.1%} vốn" if o["side"] == "buy"
               else f"BÁN {o['sym']} (RSI2: đóng cửa trên SMA5)" for o in L["orders"]]
     near = sorted(((w["level"] - marks[s]) / w["N"], s, w) for s, w in L["watch"].items() if s in marks)[:5]
     lines = [f"# Thợ săn Swing (sổ lệnh giấy), phiên {vn(L['last_session'])}", "", head, ""]
@@ -385,7 +402,11 @@ class FakeMarket:
 
 
 def selftest() -> None:
+    global HOME
+    import contextlib
     from datetime import date, timedelta
+    import io
+    import tempfile
     d0 = date(2026, 1, 1)
     up = [(d0 + timedelta(i), 100 + 0.5 * i, 100.3 + 0.5 * i, 99.7 + 0.5 * i, 100 + 0.5 * i) for i in range(260)]
     last = up[-1][4]
@@ -395,12 +416,17 @@ def selftest() -> None:
     L = new_ledger(1000.0, dip[-1][0])
     process_session(L, dip[-1][0], mk, ["AAA"])                     # RSI2 < 5 after 3 down days -> queue a buy
     assert [o["side"] for o in L["orders"]] == ["buy"], L["orders"]
+    home, HOME = HOME, Path(tempfile.mkdtemp())                      # the report files go to a scratch folder
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        report(L, [], 1)
+    HOME = home
+    assert "MUA AAA (RSI2 " in out.getvalue() and "khoảng 7.5% vốn" in out.getvalue(), out.getvalue()
     process_session(L, dip[-1][0], mk, ["AAA"])                     # same session again: nothing new
     assert len(L["orders"]) == 1 and L["last_session"] == dip[-1][0].isoformat(), L["orders"]
     process_session(L, rebound[0][0], mk, ["AAA"])                  # filled at that open; close > SMA5 -> queue sell
     pos = [p for p in L["positions"] if p["sleeve"] == "rsi2"]
     assert len(pos) == 1 and abs(pos[0]["entry"] - (last - 8.5) * (1 + SLIP)) < 1e-9, pos
-    assert abs(pos[0]["qty"] * pos[0]["entry"] - WEIGHT * 1000) < 1e-6, pos   # 5% of equity
+    assert abs(pos[0]["qty"] * pos[0]["entry"] - 75.0) < 1e-6, pos   # 7.5% of the 1000 equity
     assert [o["side"] for o in L["orders"]] == ["sell"], L["orders"]
     process_session(L, rebound[1][0], mk, ["AAA"])                  # sold at the next open
     closed = [c for c in L["closed"] if c["sleeve"] == "rsi2"]
@@ -413,18 +439,32 @@ def selftest() -> None:
     # the 110 high is inside 55 sessions but not 20; the 95 low is inside 20 sessions but not 10
     brk = [(d0 + timedelta(60), 100.5, 103, 100, 102)]
     drop = [(d0 + timedelta(61), 99.5, 100, 97, 98)]
-    syms = [f"S{k}" for k in range(SLOTS + 2)]
-    mk2 = FakeMarket({s: flat + brk + drop for s in syms})
+    syms = [f"S{k:02d}" for k in range(SLOTS + 2)]
+    mk2 = FakeMarket({s: flat + ([(d0 + timedelta(60), 100.5, 109, 100, 102)] if s == syms[-1] else brk) + drop for s in syms})
     T = new_ledger(1000.0, d0 + timedelta(59))
     process_session(T, d0 + timedelta(59), mk2, syms)               # watch level = prior 20-session high, 101
     assert all(w["level"] == 101 for w in T["watch"].values()), T["watch"]
-    process_session(T, d0 + timedelta(60), mk2, syms)               # every symbol breaks out, only SLOTS fill
+    process_session(T, d0 + timedelta(60), mk2, syms)               # every symbol breaks out, only SLOTS fill; strongest wins
     tpos = [p for p in T["positions"] if p["sleeve"] == "turtle"]
-    assert len(tpos) == SLOTS and all(abs(p["entry"] - 101 * (1 + SLIP)) < 1e-9 for p in tpos), tpos
+    assert len(tpos) == SLOTS and syms[-1] in {p["sym"] for p in tpos} and all(abs(p["entry"] - 101 * (1 + SLIP)) < 1e-9 for p in tpos), tpos
     assert all(p["stop"] == 99 for p in tpos), tpos                  # max(entry - 2N ≈ 96.6, 10-session low 99)
-    process_session(T, d0 + timedelta(61), mk2, syms)               # low 97 breaks the stop at 99
+    # inside the same 15m bar, exits run before entries so a freed slot can be reused immediately
+    mk2.days[syms[-2]][-1] = (d0 + timedelta(61), 100.5, 105, 100, 104)  # missed on day 60, breaks out on day 61 while others stop out
+    process_session(T, d0 + timedelta(61), mk2, syms)               # 10 low-97 stops run first, then syms[-2] fills
     tout = [c for c in T["closed"] if c["sleeve"] == "turtle"]
     assert len(tout) == SLOTS and all(abs(c["exit"] - 99 * (1 - SLIP)) < 1e-9 for c in tout), tout
+    assert [p["sym"] for p in T["positions"] if p["sleeve"] == "turtle"] == [syms[-2]], T["positions"]
+    # a perp whose price is not the stock Yahoo shows under that ticker (STXX: 31.7x) must be left out
+    yb = [(date(2026, 10, i), 0, 0, 0, 100.0 + i) for i in range(1, 11)]
+    kl = lambda r: [[int(datetime(2026, 10, i, tzinfo=timezone.utc).timestamp() * 1000), 0, 0, 0, (100.0 + i) * r]  # noqa: E731
+                    for i in range(1, 11)]
+    assert same_price(kl(1.01), yb) and not same_price(kl(31.7), yb) and not same_price([], yb)
+    # a symbol that leaves the universe: its pending buy is cancelled and its Turtle watch dropped
+    U = new_ledger(1000.0, d0)
+    U["orders"].append(dict(sleeve="rsi2", sym="GONE", side="buy", signal_date="2026-01-01", rsi=1.0))
+    U["watch"] = {"GONE": dict(level=1.0, N=1.0)}
+    process_session(U, date(2026, 1, 5), FakeMarket({}), [])
+    assert not U["orders"] and not U["watch"] and not U["positions"], U
     print("swing_paper selftest ok")
 
 

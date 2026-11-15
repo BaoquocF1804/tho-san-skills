@@ -14,15 +14,17 @@ Chạy thử bằng sổ lệnh giấy hai chiến lược đã backtest trên h
 ## Luật (cố định, không tự chỉnh)
 | | RSI(2) | Turtle 20/10 |
 |---|---|---|
-| Vào | Đóng cửa > SMA200 và RSI(2) < 5 → mua lúc mở cửa 09:30 New York phiên sau | Lệnh dừng mua khi giá vượt đỉnh 20 phiên (hợp đồng Binance chạy 24/7) |
+| Vào | Đóng cửa > SMA200 và RSI(2) < 5 → mua lúc mở cửa 09:30 New York phiên sau | Lệnh dừng mua khi giá vượt đỉnh 20 phiên (trong phiên 09:30–16:00 New York) |
 | Thoát | Đóng cửa > SMA5 → bán lúc mở cửa phiên sau | Giá thủng max(giá vào − 2N, đáy 10 phiên), N = ATR 20 phiên |
-| Vị thế | Tối đa 10, mỗi vị thế 5% vốn | Tối đa 10, mỗi vị thế 5% vốn |
+| Vị thế | Tối đa 10, mỗi vị thế 7,5% vốn | Tối đa 10, mỗi vị thế 7,5% vốn |
 
 - **Danh sách mã:** hợp đồng cổ phiếu Mỹ trên Binance, không gồm ETF, khối lượng trung vị ≥ 1 triệu USDT/ngày.
 - **Chi phí:** phí 0,05% taker cộng 0,02% trượt giá mỗi chiều, cộng funding thật.
 - **Mốc so sánh:** giữ đều các mã từ ngày bắt đầu sổ.
 - **Backtest gốc:** `~/vintage_book/nill-backtest/results/swing.md`.
 - **Nâng cấp 08/11/2026:** Turtle 20/10 thay 55/20, vì tốt hơn ở cả 4 giai đoạn backtest. Chi tiết ở `~/vintage_book/nill-backtest/results/swing-upgrade.md`.
+- **Cỡ lệnh 08/11/2026:** 7,5% mỗi vị thế thay 5%, tổng tối đa 150% vốn, theo lựa chọn của người dùng. Trong backtest, lãi và mức sụt cùng tăng 1,5 lần, Sharpe giữ nguyên. Chi tiết ở `~/vintage_book/nill-backtest/results/swing-upgrade-2.md`.
+- **Đã thử và loại (vòng 2):** giới hạn 2 lệnh RSI(2) cùng ngành hoặc cùng nhịp giá, dừng lỗ RSI(2) 10%. Không cải thiện Sharpe ở cả 2006–2015 và 2016–2024.
 
 ## Quy trình
 `swing_paper.py` dưới đây là `python3 ~/.gemini/config/skills/tho-san-swing/scripts/swing_paper.py`.
