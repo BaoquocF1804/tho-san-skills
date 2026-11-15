@@ -12,6 +12,7 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
 - Danh sách mã do script tự lấy từ `exchangeInfo` của Binance, không liệt kê tay.
 - Cột `mkt` theo `underlyingType` của Binance: `US`, `ADR` (niêm yết ở Mỹ, giao dịch giờ Mỹ, vd. `TSM`, `SKHY`), `KR`, `HK` (gồm H-share của doanh nghiệp đại lục, vd. `ZHONGJI`, `GIGADEV`), `CN` (A-share), `PRE` (chưa niêm yết, không có BCTC).
 - ETF/ETP đòn bẩy bị loại khỏi `scan`; `--include-etfs` chỉ để xem, `plan` luôn FAIL ETF.
+- Người dùng đặt lệnh trên **OKX**. Dữ liệu phân tích vẫn lấy từ Binance, nhưng `scan`, `detail`, `plan` và `stops` chỉ nhận mã OKX cũng niêm yết: cùng tên, loại cổ phiếu, giá lệch ≤ 1%; riêng `scan` còn cần volume OKX 24h ≥ 0,5 triệu USD (`--okx-min-qv`). Bị loại: mã chỉ có trên Binance (Tencent, Meituan, BYD, BABA, ANET, UBER…) và pre-IPO OPENAI, ANTHROPIC (hai sàn định nghĩa hợp đồng khác nhau, giá lệch khoảng 90%).
 
 ## Khung rủi ro (mặc định; dùng số người dùng nói nếu khác)
 | Tham số | Giá trị |
@@ -50,10 +51,14 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
    - Tối đa 3 mã cùng một ngành (cột `sector`).
    - Nếu dòng `Tradeable by sector` có mã ngoài bán dẫn/AI (Electronic Technology, Technology Services), phải soi ít nhất 1–2 mã ngoài nhóm đó, chọn mã có xu hướng hoặc chất xúc tác rõ nhất. Tin tức xoay quanh chip không phải lý do để chỉ soi chip.
    - Lệnh: `hunt_stock_data.py detail SYM1 SYM2 ...` (mức giá theo ATR, vị thế nhỏ lẻ và top trader, định giá và tăng trưởng quy USD, bảng quý SEC nếu công ty nộp 10-Q, nến hôm nay, nến 4h).
+   - Dòng `OKX <hợp đồng>`: giá OKX so với Binance, volume 24h trên OKX, 1 hợp đồng bằng bao nhiêu cổ phiếu, đòn bẩy tối đa.
+   - Dòng `OKX crowd 100d`: OI, L/S nhỏ lẻ, top trader và taker của riêng OKX trong 100 ngày (`pct100` là phân vị 100 ngày), cùng funding OKX, tức khoản người dùng thực trả. Ngày OKX bắt đầu lúc 16:00 UTC, nên dòng mới nhất là ngày đang chạy.
 4. **Dựng setup, chiều nào cũng được:** ưu tiên LONG cổ phiếu tăng trưởng doanh thu/EPS mạnh, hưởng lợi chu kỳ ngành của chính nó (bán dẫn/AI, phần mềm, y tế, tiêu dùng, tài chính, công nghiệp, năng lượng…) đang hồi về hỗ trợ/EMA; ưu tiên SHORT cổ phiếu suy giảm cơ bản, định giá quá cao, hoặc nhỏ lẻ fomo quá nóng khi gãy cấu trúc. Stop đặt ở mức luận điểm sai **và** vượt qua đỉnh/đáy swing gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
    - Dò stop bằng `hunt_stock_data.py stops LONG|SHORT SYM [--span 0.07] [--step 0.005]`, đừng viết script dò riêng. Lệnh này in, cho từng entry tính từ mark, mức stop chặt nhất mà `plan` cho qua. Mục tiêu 1,5R/2R đi kèm chỉ để tham chiếu. `WARN near` là đỉnh/đáy 20 phiên gần ngay sát stop.
 5. **Kiểm từng lệnh ngay trước khi báo:** `hunt_stock_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C] [--horizon-days N] [--earnings-date YYYY-MM-DD]`.
    - `FAIL` thì sửa mức hoặc bỏ lệnh.
+   - `plan` và `stops` từ chối mã không đặt được trên OKX (`không đặt được trên OKX`): bỏ mã đó.
+   - Dòng Size tính theo **số hợp đồng OKX**, ví dụ `0.81 hợp đồng NVDA-USDT-SWAP (0.81 NVDA ≈ 128.39 USDT)`; người dùng đặt đúng số hợp đồng này trên OKX. Gặp `FAIL size >= OKX minimum` hoặc `FAIL … OKX max leverage` thì đổi đòn bẩy hoặc bỏ lệnh.
    - Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark.
    - `PASS` thì `plan` in `Hạng tối đa` và 4 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý; Cơ bản & KQKD). Báo cáo dán nguyên văn các dòng này (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu. Không gõ lại con số nào. Độ lệch mark–index và dòng KQKD cũng chép từ output.
    - Lần `plan` cuối của mỗi lệnh đưa vào báo cáo phải thêm `--log`:
@@ -139,6 +144,7 @@ _Phân tích tham khảo, không phải lời khuyên đầu tư._
 | Ba lệnh cùng chiều cùng nhóm ngành (bán dẫn/AI) không cảnh báo | Nêu tương quan, khuyên tối đa 2 lệnh cùng nhóm |
 | Chỉ soi và chỉ báo cáo chip/AI (các lượt săn 06–13/11 chỉ ra AVGO, TSM, META, GOOGL, TSLA), vì `scan` từng cắt ở 40 mã mà 29/40 là công nghệ | Quét toàn bộ, không tự thêm `--top`; chọn mã soi kỹ theo bước 3 (tối đa 3 mã/ngành, ít nhất 1–2 mã ngoài bán dẫn/AI khi có) |
 | Bỏ mã `OKxN` vì nghĩ là "quá biến động", hoặc chạy `plan` ở x5 cho mã `OKx3` | `OKxN` vẫn giao dịch được: chạy `stops` / `plan` với `--leverage N` và dán dòng Size có `(xN)` |
+| Đề xuất mã chỉ có trên Binance (Tencent, ANET…), hoặc tự quy đổi size từ cổ phiếu sang hợp đồng | Chỉ chọn mã có trong bảng `scan`; `plan` chặn mã không có trên OKX; dán nguyên dòng Size (đã là số hợp đồng OKX) |
 | Bịa số hoặc mức giá | Chỉ dùng số từ script và bài có nguồn |
 | Gõ lại số vào báo cáo hoặc Telegram, lệch với `plan` | Dán các dòng `TG:` của lần `plan` cuối |
 | Trích link news.google.com cho mã Mỹ | Dùng link bài gốc trong mục Yahoo của `news` |

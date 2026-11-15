@@ -21,7 +21,7 @@ Ghi lại từ các lượt săn 27/10–14/11/2026. Đọc trước khi viết 
 - Lệnh limit 24 giờ đặt thứ Bảy hoặc Chủ nhật hết hạn trước khi sàn cơ sở nào mở cửa (Hàn Quốc mở 07:00 thứ Hai giờ VN). Vì vậy chỉ lệnh trong khoảng 1% quanh mark mới khớp được. Riêng mã `PRE` (OPENAI, ANTHROPIC) có giao dịch thật cuối tuần.
 - Lệnh bán chờ phía trên giá, đặt trước một tin vĩ mô Mỹ, chỉ khớp khi tin tốt (CPI ra lúc 20:30 giờ VN, trước giờ mở cửa 21:30). `plan` đã hạ trần xuống B; ghi rõ vào **Phản biện**.
 - Lệnh limit hết hạn mà vẫn để trên sàn có thể khớp sau đó. Khi người dùng hỏi, kiểm nến 1h cả sau mốc 24 giờ.
-- Hợp đồng cổ phiếu không có sàn thay thế: Binance dừng giao dịch thì chỉ còn stop theo Mark Price.
+- Người dùng đặt lệnh trên OKX. OKX niêm yết 186/227 hợp đồng cổ phiếu của Binance (15/11), nhưng volume chỉ khoảng 1/8. Script lấy nến từ Binance, nên Binance dừng giao dịch thì không săn được dù OKX vẫn chạy: chỉ quản lý lệnh đang mở trên OKX bằng stop theo Mark Price.
 
 ## Dựng setup
 - Mã vốn hóa lớn có đỉnh/đáy dày đặc (MSFT 486–510, AAPL 321–358) có thể không có stop hợp lệ ở R:R ≥ 1,5. Chạy `stops` trước khi tốn công phân tích.

@@ -9,6 +9,8 @@ description: >-
 ## Tổng quan
 Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`hunt_data.py`](./scripts/hunt_data.py), tin tức có ngày từ agent-reach, tự phân tích, báo cáo tiếng Việt. Mọi con số lấy từ script ngay lúc báo cáo; mọi tin có ngày và nguồn; không có lệnh hạng A thì nói thẳng. Chỉ phân tích, không đặt lệnh; báo cáo xong thì gửi lên Telegram qua Hermes.
 
+Người dùng đặt lệnh trên **OKX**. Dữ liệu phân tích vẫn lấy từ Binance (thị trường dày nhất), còn mọi lệnh của script chỉ nhận mã đặt được trên OKX và tính size theo hợp đồng OKX (`okx_gate.py` ở gốc repo skills).
+
 ## Khung rủi ro (mặc định; dùng số người dùng nói nếu khác)
 | Tham số | Giá trị |
 |---|---|
@@ -24,6 +26,7 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
 
 ## Quy trình
 1. **Dữ liệu:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py scan` (khoảng 15 giây, 40 hợp đồng lớn nhất). Săn mã cờ `OK` (x5) và `OKxN` (dùng `--leverage N`). Bỏ `ATR` (quá biến động kể cả ở x2, hoặc mã mới chưa đủ 15 nến ngày) và `PUMP` (vừa pump hoặc funding cực đoan).
+   - Bảng chỉ còn mã đặt được trên OKX: cùng tên, cùng loại coin, giá OKX lệch Binance ≤ 1%, volume OKX 24h ≥ 2 triệu USD (`--okx-min-qv`). Bị loại: mã chỉ có trên Binance (DODOX, KAVA, XMR…), hợp đồng 1000x của Binance (1000PEPE, 1000SHIB, 1000BONK…), và mã trùng tên một cổ phiếu trên OKX (BB, ON, QNT).
 2. **Tin tức. REQUIRED SUB-SKILL:** agent-reach.
    - Đọc [references/nguon-tin.md](references/nguon-tin.md) trước: các trang đọc được khi Exa bị chặn (bản đồ thanh lý, ETF, lịch sự kiện) và các bẫy số liệu đã gặp.
    - Chạy `agent-reach doctor --text` trước.
@@ -34,9 +37,14 @@ Tự săn lệnh crypto trên Binance USDⓈ-M: dữ liệu mới từ script [`
      - lịch sự kiện 2 tuần tới: mở khóa token, nâng cấp, FOMC
      - tin riêng từng mã trong shortlist (OI kỷ lục, hack, unlock, ETF)
 3. **Soi kỹ 3–6 mã:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py detail SYM1 SYM2 ...` (mức hỗ trợ/kháng cự đã gom cụm 0,25 ATR và tính cả S/R flip, vị thế nhỏ lẻ và top trader, nến hôm nay, nến 4h).
+   - Dòng `OKX <hợp đồng>`: giá OKX so với Binance, volume 24h trên OKX, 1 hợp đồng bằng bao nhiêu coin, đòn bẩy tối đa.
+   - Dòng `OKX crowd 100d`: OI, L/S nhỏ lẻ, top trader và taker của riêng OKX trong 100 ngày (`pct100` là phân vị 100 ngày), cùng funding OKX, tức khoản người dùng thực trả. Ngày OKX bắt đầu lúc 16:00 UTC (0h giờ Hồng Kông), nên dòng mới nhất là ngày đang chạy. Dòng vị thế Binance (`pct30`) vẫn là đám đông lớn nhất; dòng OKX cho biết đám đông trên chính sàn đặt lệnh.
 4. **Dựng setup, chiều nào cũng được:** hồi về hỗ trợ trong xu hướng; phá vỡ hoặc thủng mức có OI và taker xác nhận; đảo chiều khi đòn bẩy quá nóng (OI tăng mạnh, funding cao, nhỏ lẻ dồn một phía, top trader phía kia); catalyst có ngày. Stop đặt ở mức luận điểm sai **và** vượt qua cụm thanh lý / đỉnh đáy quét stop gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
    - Dò stop bằng `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py stops LONG|SHORT SYM [--span 0.07] [--step 0.005]`, đừng viết script dò riêng. Lệnh này in, cho từng entry tính từ mark, mức stop chặt nhất mà `plan` cho qua. Mục tiêu 1,5R/2R đi kèm chỉ để tham chiếu. `WARN near` là đỉnh/đáy 20 ngày gần ngay sát stop.
 5. **Kiểm từng lệnh ngay trước khi báo:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C]`. `FAIL` thì sửa mức hoặc bỏ lệnh; entry xa mark là lệnh chờ (`limit` hoặc `stop` theo output của script). Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark. `PASS` thì `plan` in `Hạng tối đa`, sẵn 3 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý) và dòng `DESK:`. Báo cáo dán nguyên văn các dòng `TG:` (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu; desk chạy đúng dòng `DESK:`. Không gõ lại con số nào.
+   - `plan` và `stops` từ chối mã không đặt được trên OKX (`không đặt được trên OKX`): bỏ mã đó.
+   - Dòng Size tính theo **số hợp đồng OKX**, ví dụ `0.9 hợp đồng ETH-USDT-SWAP (0.09 ETH ≈ 157.95 USDT)`; người dùng đặt đúng số hợp đồng này trên OKX. Gặp `FAIL size >= OKX minimum` hoặc `FAIL … OKX max leverage` thì đổi đòn bẩy hoặc bỏ lệnh.
+   - Dòng `DESK:` vẫn dùng mã Binance, vì desk chấm điểm theo nến Binance (giá hai sàn thường lệch 0,03–0,05%).
 6. **Ghi desk trước khi viết báo cáo** (máy có `~/crypto-desk-rewrite`; người dùng nói "không ghi" thì bỏ bước này). `desk` dưới đây là `~/crypto-desk-rewrite/scripts/desk`.
    - Lệnh cũ lấy từ desk, không từ `/tmp` (WSL khởi động lại là mất): `desk --json calls --status LOGGED`, giữ các dòng `segment` `tho-san` có `outcome` null (desk để `LOGGED` cả lệnh đã chấm). Chia theo `filled_at`:
      - có giờ: **đang chạy** (limit đã khớp, hoặc lệnh vào ngay), kể cả khi `expires_at` đã qua. Không hủy; quyết định giữ hay đóng sớm ở mức nào, và tính là vị thế đang mở ở mục Quản lý rủi ro.
@@ -120,6 +128,7 @@ _Phân tích tham khảo, không phải lời khuyên đầu tư._
 | Đặt lệnh chờ đánh thủng đáy nhưng ghi là `limit bán` | Đánh thủng đáy (SHORT dưới giá mark) hoặc vượt đỉnh (LONG trên giá mark) phải là lệnh `stop` |
 | Ba lệnh cùng chiều không cảnh báo | Nêu tương quan, khuyên tối đa 2 lệnh |
 | Bịa số hoặc mức giá | Chỉ dùng số từ script và bài có nguồn |
+| Đề xuất mã chỉ có trên Binance, hoặc tự quy đổi size từ coin sang hợp đồng | Chỉ chọn mã có trong bảng `scan`; `plan` chặn mã không có trên OKX; dán nguyên dòng Size (đã là số hợp đồng OKX) |
 | Gõ lại số vào báo cáo, Telegram hoặc desk (desk ghi stop 2455 khi `plan` đã duyệt 2462) | Dán dòng `TG:`, chạy dòng `DESK:` của lần `plan` cuối |
 | Ghi lại lệnh chờ đang giữ thành lệnh mới (#24, #25, #26 là cùng một lệnh ETH) | Desk trả `"duplicate": true` kèm id cũ; báo cáo ghi "giữ #id" |
 | Thay hoặc bỏ lệnh chờ nhưng lệnh cũ vẫn `LOGGED` và vẫn được chấm điểm | `desk cancel-call ID` trước khi ghi lệnh thay |
