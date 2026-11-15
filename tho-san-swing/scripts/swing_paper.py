@@ -59,8 +59,8 @@ def rsi(c: list, n: int = 2) -> list:
     return out
 
 
-def atr_wilder(h: list, l: list, c: list, n: int = 20) -> list:
-    tr = [h[0] - l[0]] + [max(h[i] - l[i], abs(h[i] - c[i - 1]), abs(l[i] - c[i - 1])) for i in range(1, len(c))]
+def atr_wilder(h: list, lo: list, c: list, n: int = 20) -> list:
+    tr = [h[0] - lo[0]] + [max(h[i] - lo[i], abs(h[i] - c[i - 1]), abs(lo[i] - c[i - 1])) for i in range(1, len(c))]
     out = [None] * len(c)
     if len(tr) < n:
         return out
@@ -115,11 +115,11 @@ def turtle_session(L: dict, d: date, mk) -> list[str]:
         if find(L, "turtle", sym):
             continue
         hit = next(((t, max(w["level"], o), -(h - w["level"]) / w["N"])
-                    for t, o, h, l, c in mk.bars15(sym, d) if h > w["level"]), None)
+                    for t, o, h, lo, c in mk.bars15(sym, d) if h > w["level"]), None)
         if hit:
             cand.append((hit[0], 1, hit[2], "entry", sym, hit[1], w))
     for p in [p for p in L["positions"] if p["sleeve"] == "turtle"]:
-        hit = next(((t, min(p["stop"], o)) for t, o, h, l, c in mk.bars15(p["sym"], d) if l <= p["stop"]), None)
+        hit = next(((t, min(p["stop"], o)) for t, o, h, lo, c in mk.bars15(p["sym"], d) if lo <= p["stop"]), None)
         if hit:
             cand.append((hit[0], 0, 0.0, "exit", p["sym"], hit[1], p))
     for t, _, _, kind, sym, px, x in sorted(cand, key=lambda e: e[:3]):
@@ -136,7 +136,7 @@ def turtle_session(L: dict, d: date, mk) -> list[str]:
         p = open_position(L, "turtle", sym, px * (1 + SLIP), d, N=x["N"], stop0=stop, stop=stop)
         events.append(f"MUA {sym} (Turtle, phá đỉnh {TURTLE_IN} phiên {x['level']:.2f}) @ {p['entry']:.2f}, "
                       f"dừng {stop:.2f}")
-        later = next(((t2, min(stop, o)) for t2, o, h, l, c in mk.bars15(sym, d) if t2 > t and l <= stop), None)
+        later = next(((t2, min(stop, o)) for t2, o, h, lo, c in mk.bars15(sym, d) if t2 > t and lo <= stop), None)
         if later:
             c = close_position(L, p, later[1] * (1 - SLIP), d, "turtle-exit", mk)
             events.append(f"BÁN {sym} (Turtle, chạm dừng ngay trong phiên) @ {c['exit']:.2f}: {c['pnl']:+.2f} USDT")
@@ -171,13 +171,13 @@ def process_session(L: dict, d: date, mk, universe: list[str]) -> list[str]:
         bars = [b for b in (mk.daily(sym) or []) if b[0] <= d]
         if not bars or bars[-1][0] != d:
             continue
-        h, l, c = [b[2] for b in bars], [b[3] for b in bars], [b[4] for b in bars]
+        h, lo, c = [b[2] for b in bars], [b[3] for b in bars], [b[4] for b in bars]
         marks[sym] = c[-1]
         if (p := find(L, "rsi2", sym)) and len(c) >= 5 and c[-1] > sum(c[-5:]) / 5 \
                 and not any(o["sym"] == sym and o["side"] == "sell" for o in L["orders"]):
             L["orders"].append(dict(sleeve="rsi2", sym=sym, side="sell", signal_date=d.isoformat(), rsi=None))
-        if (p := find(L, "turtle", sym)) and len(l) >= TURTLE_OUT:
-            p["stop"] = max(p["stop0"], min(l[-TURTLE_OUT:]))
+        if (p := find(L, "turtle", sym)) and len(lo) >= TURTLE_OUT:
+            p["stop"] = max(p["stop0"], min(lo[-TURTLE_OUT:]))
         if sym not in universe:
             continue
         if len(c) >= 201 and not find(L, "rsi2", sym) and not any(o["sym"] == sym for o in L["orders"]):
@@ -185,7 +185,7 @@ def process_session(L: dict, d: date, mk, universe: list[str]) -> list[str]:
             if c[-1] > sum(c[-200:]) / 200 and r2 is not None and r2 < 5:
                 cands.append((r2, sym))
         if len(c) > max(TURTLE_IN, 20) and not find(L, "turtle", sym):
-            N = atr_wilder(h, l, c, 20)[-1]
+            N = atr_wilder(h, lo, c, 20)[-1]
             if N:
                 watch[sym] = dict(level=max(h[-TURTLE_IN:]), N=N)
     busy = sum(1 for p in L["positions"] if p["sleeve"] == "rsi2") + sum(1 for o in L["orders"] if o["side"] == "buy")
@@ -229,8 +229,9 @@ def yahoo_daily(sym: str) -> list | None:
         except Exception:
             return None
         q = r["indicators"]["quote"][0]
-        rows = [[datetime.fromtimestamp(t, NY).date().isoformat(), o, h, l, c]
-                for t, o, h, l, c in zip(r["timestamp"], q["open"], q["high"], q["low"], q["close"]) if None not in (o, h, l, c)]
+        rows = [[datetime.fromtimestamp(t, NY).date().isoformat(), o, h, lo, c]
+                for t, o, h, lo, c in zip(r["timestamp"], q["open"], q["high"], q["low"], q["close"])
+                if None not in (o, h, lo, c)]
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(json.dumps(rows))
         time.sleep(1.0)
@@ -392,10 +393,10 @@ class FakeMarket:
         return self.days.get(sym)
 
     def open_price(self, sym, d):
-        return next((o for dd, o, h, l, c in self.days[sym] if dd == d), None)
+        return next((o for dd, o, h, lo, c in self.days[sym] if dd == d), None)
 
     def bars15(self, sym, d):
-        return [(1, o, h, l, c) for dd, o, h, l, c in self.days[sym] if dd == d]
+        return [(1, o, h, lo, c) for dd, o, h, lo, c in self.days[sym] if dd == d]
 
     def funding(self, sym, start, end):
         return 0.0001  # 0.01% of notional over any holding
@@ -404,7 +405,6 @@ class FakeMarket:
 def selftest() -> None:
     global HOME
     import contextlib
-    from datetime import date, timedelta
     import io
     import tempfile
     d0 = date(2026, 1, 1)

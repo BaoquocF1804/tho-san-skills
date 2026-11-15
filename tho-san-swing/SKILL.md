@@ -37,11 +37,12 @@ Chạy thử bằng sổ lệnh giấy hai chiến lược đã backtest trên h
    - Lệnh: `hermes send --to telegram --file <TG_FILE>`. Đường dẫn file nằm ở dòng `TG_FILE:` cuối báo cáo, và dòng đầu của file đã là tiêu đề.
    - Exit khác 0 thì báo người dùng kèm lỗi, không thử lại liên tục.
    - Người dùng nói "không gửi" thì bỏ bước này.
-   - Báo cáo ghi "Chưa có phiên mới" thì không gửi, vì cron đã gửi lúc xử lý phiên đó.
+   - Báo cáo ghi "Chưa có phiên mới" thì không gửi: phiên đó đã được gửi lúc được xử lý.
 4. Chỉ xem sổ, không xử lý phiên mới: `swing_paper.py status`.
 
 ## Chạy tự động
-- Cron trong WSL chạy `bash scripts/cron_scan.sh` vào phút thứ 7 mỗi giờ.
+- **Đang tắt từ 14/11/2026** theo yêu cầu người dùng. Crontab không còn dòng `tho-san-swing`, nên sổ chỉ chạy khi gọi `scan` bằng tay; lượt `scan` kế tiếp tự bù các phiên đã lỡ. Chỉ bật lại khi người dùng bảo: `(crontab -l 2>/dev/null; cat ~/.local/share/tho-san-swing/crontab.bak-20261114) | crontab -`.
+- Khi bật, cron trong WSL chạy `bash scripts/cron_scan.sh` vào phút thứ 7 mỗi giờ.
   - Script chỉ thật sự xử lý mỗi phiên Mỹ một lần, sau giờ đóng cửa, và gửi Telegram đúng một lần cho phiên đó.
   - WSL hoặc máy tắt thì lượt chạy kế tiếp tự bù các phiên bị lỡ.
   - Quét lỗi 3 lần liền thì gửi một tin cảnh báo ⚠️; vẫn lỗi thì cứ 24 lần, khoảng mỗi ngày, nhắc lại.
