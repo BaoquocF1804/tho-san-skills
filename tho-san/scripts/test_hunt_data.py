@@ -6,8 +6,10 @@ Run: PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider ~/.gemin
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -267,12 +269,6 @@ def test_stops_steps_a_short_stop_past_the_swing_high_band(monkeypatch, capsys, 
     assert 112.3 < float(rows[0][4]) < 112.8  # just past 110 + 0.25 ATR
 
 
-@pytest.fixture(autouse=True)
-def _no_kronos(monkeypatch):
-    """Offline checks never load the Kronos model: plan/detail fall back to their no-MC path."""
-    monkeypatch.setitem(sys.modules, "kronos", None)
-
-
 def test_plan_tells_the_report_which_leverage_the_margin_assumes(monkeypatch, capsys, tmp_path):
     _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
     out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75",
@@ -280,10 +276,31 @@ def test_plan_tells_the_report_which_leverage_the_margin_assumes(monkeypatch, ca
     assert "(x2)" in _line(out, "TG: • Size:")
 
 
-def test_kronos_stays_out_of_plan_and_detail_unless_asked(monkeypatch, capsys, tmp_path):
-    # 13/11 walk-forward check: Kronos-small daily forecasts were biased and worse than a coin flip.
-    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
-    args = ("plan", "SHORT", "COINUSDT", "--stop", "114", "--target", "75", "--leverage", "2")
-    assert "Kronos" not in _run(monkeypatch, capsys, *args)
-    assert "Kronos" in _run(monkeypatch, capsys, *args, "--kronos")
-    assert "Kronos" not in _run(monkeypatch, capsys, "detail", "COINUSDT")
+def test_get_retries_a_stalled_binance_response(monkeypatch):
+    # Python 3.10 urllib raises a bare TimeoutError (not URLError) when Binance takes the request and stalls,
+    # so one stuck request out of a scan's hundreds used to kill the whole scan.
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise TimeoutError("timed out")
+        return io.BytesIO(b'{"serverTime": 1}')
+
+    monkeypatch.setattr(hd.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(hd, "time", SimpleNamespace(sleep=lambda seconds: None))
+    assert hd.get("/fapi/v1/time") == {"serverTime": 1}
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("atr_pct, chg24, want", [
+    (4.0, 1.0, "OK"),
+    (8.6, 1.0, "OKx4"),  # ADA 15/11: under the 8.75% x5 cap, but a 1.00-1.02 ATR stop window has no room
+    (12.0, 1.0, "OKx3"),
+    (18.0, 1.0, "OKx2"),
+    (25.0, 1.0, "ATR"),  # too wide even at x2 (23.75% cap)
+    (4.0, 30.0, "PUMP"),
+])
+def test_flag_suggests_the_highest_leverage_that_leaves_room_for_a_stop(atr_pct, chg24, want):
+    row = {"mmr": 0.025, "atr_pct": atr_pct, "chg24h": chg24, "fund": 0.0001}
+    assert hd._tag_row(row, 5)["flag"] == want

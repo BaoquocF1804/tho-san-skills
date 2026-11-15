@@ -6,9 +6,13 @@ Run: PYTHONDONTWRITEBYTECODE=1 python3 -m pytest -q -p no:cacheprovider ~/.gemin
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import io
 import json
 from pathlib import Path
 import sys
+import time
+from types import SimpleNamespace
+import urllib.error
 
 import pytest
 
@@ -347,12 +351,6 @@ def test_orders_cancel_refuses_an_order_that_already_filled(monkeypatch, capsys,
     assert "canceled_at" not in json.loads(path.read_text())[0]
 
 
-@pytest.fixture(autouse=True)
-def _no_kronos(monkeypatch):
-    """Offline checks never load the Kronos model: plan/detail fall back to their no-MC path."""
-    monkeypatch.setitem(sys.modules, "kronos", None)
-
-
 # --- Universe and flags: 13/11 the top-40 cut left 29 of 40 names in tech and dropped 81 liquid others ---
 
 def _tickers(n_liquid: int) -> tuple[dict, dict, dict]:
@@ -400,12 +398,131 @@ def test_plan_tells_the_report_which_leverage_the_margin_assumes(monkeypatch, ca
     assert "Ký quỹ: " in size and "(x3)" in size
 
 
-def test_kronos_stays_out_of_plan_and_detail_unless_asked(monkeypatch, capsys):
-    # 13/11 walk-forward check: Kronos-small daily forecasts were biased and worse than a coin flip, so its lines
-    # must not reach a report by default. The kronos import is blocked here, so asking for it prints its error.
-    _fake_exchange(monkeypatch, _daily_bars(68))
-    assert "Kronos" not in _plan(monkeypatch, capsys, "--stop", "95", "--target", "110")
-    assert "Kronos" in _plan(monkeypatch, capsys, "--stop", "95", "--target", "110", "--kronos")
-    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "detail", "TEST"])
+# --- 15/11 review fixes ---
+
+def _no_wait(monkeypatch) -> None:
+    monkeypatch.setattr(h, "time", SimpleNamespace(sleep=lambda seconds: None, monotonic=time.monotonic))
+
+
+@pytest.mark.parametrize("first_error", [
+    TimeoutError("timed out"),  # Python 3.10 urllib raises it bare when Binance takes the request and stalls
+    urllib.error.HTTPError("https://fapi.binance.com/fapi/v1/time", 408, "Request Timeout", None, None),
+])
+def test_get_binance_retries_a_stalled_or_timed_out_request(monkeypatch, first_error):
+    calls = []
+
+    def urlopen(request, timeout):
+        calls.append(request.full_url)
+        if len(calls) == 1:
+            raise first_error
+        return io.BytesIO(b'{"serverTime": 1}')
+
+    monkeypatch.setattr(h.urllib.request, "urlopen", urlopen)
+    _no_wait(monkeypatch)
+    assert h.get_binance("/fapi/v1/time") == {"serverTime": 1}
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("error", [
+    urllib.error.HTTPError("https://data.sec.gov/x", 403, "Forbidden", None, None),  # "Undeclared Automated Tool"
+    TimeoutError("timed out"),
+])
+def test_sec_trouble_means_no_fundamentals_not_a_crash(monkeypatch, error):
+    # Every plan reads SEC; raising there would stop every stock hunt over optional fundamentals.
+    def urlopen(request, timeout):
+        raise error
+
+    monkeypatch.setattr(h.urllib.request, "urlopen", urlopen)
+    _no_wait(monkeypatch)
+    assert h.get_sec_json("https://data.sec.gov/submissions/CIK0000000123.json") is None
+
+
+def test_order_status_catches_a_stop_in_the_hour_the_order_filled():
+    # Binance starts 1h bars at the first full hour after startTime, so a market call created at 03:30 never had
+    # its 03:30-04:00 stop checked; the 5m bars cover that part of the hour.
+    market = {**LIMIT_LONG, "order": "market"}
+    k5m = [_k(T0, 350, 349), _k(T0 + timedelta(minutes=10), 349, 330.0), _k(T0 + timedelta(minutes=15), 345, 340)]
+    k1h = [_k(T0 + timedelta(minutes=30), 352, 345), _k(T0 + timedelta(minutes=90), 355, 350)]
+    status = h.order_status(market, k5m, k1h, mark=352, now=T0 + timedelta(hours=3))
+    assert status == "KHỚP 12/11 10:30 ICT · chạm stop 12/11 10:40 ICT (-1.00R)"
+
+
+def test_levels_reach_old_swings_and_a_fresh_extreme(monkeypatch):
+    # The crypto fix of 31/10 (BEAMX printed resistance []), for stocks: on 13/11 four stocks had no resistance and
+    # eight no support, because a fresh 20/55-session extreme is no swing point yet and old swings were cut at 120.
+    days = [MONDAY + timedelta(days=i) for i in range(368)]  # ends on a Thursday, the still-forming candle
+    weekdays = [d for d in days if d.weekday() < 5]
+    special = {weekdays[20]: 130.0, weekdays[-2]: 120.0}  # a swing ~240 sessions back; the last closed session
+    bars = [_bar(d, special.get(d, 104.0), 96.0) if d.weekday() < 5 else _bar(d, 100.5, 99.5) for d in days]
+    _fake_exchange(monkeypatch, bars)
+    meta = h.equity_symbol_meta(h.get_binance("/fapi/v1/exchangeInfo"))["TESTUSDT"]
+    row = h.features("TESTUSDT", meta, {"quoteVolume": "50000000", "priceChangePercent": "0.5"},
+                     {"markPrice": "115", "indexPrice": "115", "lastFundingRate": "0.0001"}, None, {})
+    assert row["res"] == [120.0, 130.0]
+
+
+def test_plan_log_refuses_a_fourth_open_order(monkeypatch, capsys, tmp_path):
+    # 14/11 the stock book held 3 pending limits plus a filled one, though the skill allows 3 trades.
+    _fake_exchange(monkeypatch, _daily_bars(68))  # every fake candle predates the orders, so none of them fills
+    path = tmp_path / "orders.json"
+    monkeypatch.setattr(h, "ORDERS", path, raising=False)
+    for stop in ("94.8", "94.7", "94.6"):
+        assert "LOG: #" in _plan(monkeypatch, capsys, "--entry", "99", "--stop", stop, "--target", "110", "--log")
+    with pytest.raises(SystemExit, match="3 lệnh"):
+        _plan(monkeypatch, capsys, "--entry", "99", "--stop", "94.5", "--target", "110", "--log")
+    assert len(json.loads(path.read_text())) == 3
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "orders", "--cancel", "1"])
+    h.main()  # a canceled order no longer counts
+    assert "LOG: #4" in _plan(monkeypatch, capsys, "--entry", "99", "--stop", "94.5", "--target", "110", "--log")
+
+
+def test_plan_takes_an_earnings_date_confirmed_by_news(monkeypatch, capsys):
+    # SKILL step 2 said to rerun plan with the confirmed date, but plan had no way to take one.
+    _fake_exchange(monkeypatch, _daily_bars(68), EARNINGS_IN_5_DAYS)
+    later = (datetime.now(timezone.utc).date() + timedelta(days=40)).isoformat()
+    out = _plan(monkeypatch, capsys, "--stop", "95", "--target", "110", "--earnings-date", later)
+    assert _check(out, "earnings") == "PASS"
+    assert f"KQKD: {later} (còn ~40d)" in out
+
+
+def test_plan_says_when_no_earnings_date_is_known(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))  # no TradingView or SEC data: the earnings check passes blind
+    out = _plan(monkeypatch, capsys, "--stop", "95", "--target", "110")
+    assert "chưa rõ ngày KQKD" in out
+
+
+@pytest.mark.parametrize("forms, items, days_ago, want", [
+    (["8-K"], ["2.02,9.01"], 100, 0),  # results due 9 days ago and not filed yet: imminent, not "no earnings"
+    (["6-K", "6-K"], ["", ""], 5, None),  # a foreign filer's 6-Ks (monthly sales, notices) do not date earnings
+])
+def test_sec_earnings_estimate(monkeypatch, tmp_path, forms, items, days_ago, want):
+    today = datetime.now(timezone.utc).date()
+    sub = {"sicDescription": "Semiconductors", "filings": {"recent": {
+        "form": forms, "filingDate": [str(today - timedelta(days=days_ago))] * len(forms), "items": items}}}
+    monkeypatch.setattr(h, "SEC_CACHE_DIR", tmp_path)
+    monkeypatch.setattr(h, "get_sec_json", lambda url: sub if "submissions" in url else {})
+    assert h.fetch_sec_fundamentals("TEST", {"TEST": (123, "Test Corp")})["days_to_earnings"] == want
+
+
+def _news(monkeypatch, capsys, recent: dict | None) -> str:
+    monkeypatch.setattr(h, "load_sec_tickers", lambda: {"TEST": (123, "Test Corp"), "OTHR": (456, "Other Corp")})
+    monkeypatch.setattr(h, "fetch_tv_fundamentals_batch", lambda bases: {})
+    monkeypatch.setattr(h, "_fetch_google_rss", lambda query, limit=8: [])
+    monkeypatch.setattr(h, "_fetch_yahoo_rss", lambda ticker, limit=8: [])
+    monkeypatch.setattr(h, "get_sec_json", lambda url: None if recent is None else {"filings": {"recent": recent}})
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "news", "TEST", "OTHR"])
     h.main()
-    assert "Kronos" not in capsys.readouterr().out
+    return capsys.readouterr().out
+
+
+def test_news_says_when_sec_does_not_answer(monkeypatch, capsys):
+    out = _news(monkeypatch, capsys, None)  # "(no filings)" here read as "nothing happened"
+    assert out.count("SEC không trả lời") == 2 and "(no filings)" not in out
+
+
+def test_news_marks_6k_filings_to_open(monkeypatch, capsys):
+    # A 6-K carries no item codes, so a foreign filer's results or deal news never got the "!" mark.
+    filed = str(datetime.now(timezone.utc).date() - timedelta(days=1))
+    out = _news(monkeypatch, capsys, {"form": ["6-K"], "filingDate": [filed], "items": [""],
+                                      "accessionNumber": ["0000456-26-000001"], "primaryDocument": ["f6k.htm"]})
+    assert f"[{filed}] 6-K ?" in out

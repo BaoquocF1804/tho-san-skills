@@ -2,7 +2,8 @@
 """Binance USDⓈ-M public market data for a manual futures hunt (stdlib only, no API keys).
 
   python3 hunt_data.py scan [--top 40] [--leverage 5] [--workers 6]
-      universe table (top perpetuals by volume) + ~/.local/share/tho-san/market.json
+      universe table (top perpetuals by volume) + ~/.local/share/tho-san/market.json; flag OKxN means the ATR
+      only leaves room for a stop at leverage N, so stops/plan take --leverage N
   python3 hunt_data.py detail SYMBOL [SYMBOL ...]
       levels in ATRs, positioning, last daily candles, today's candle, recent 4h bars
   python3 hunt_data.py plan LONG|SHORT SYMBOL --stop X --target Y [--entry E] [--capital 1000]
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+import http.client
 import json
 import time
 import urllib.error
@@ -45,6 +47,7 @@ PUMP_CHANGE_24H = 25.0  # percent: today's move is not in the closed-candle ATR 
 PUMP_FUNDING = 0.005  # per interval, near the exchange cap: one side is paying to stay in
 TAKER_FEE_ROUNDTRIP = 0.001  # 0.05% entry + 0.05% exit on Binance USDⓈ-M
 STOP_CLEARANCE_ATR = 0.25  # a stop nearer than this to a daily high/low goes with the wick that sweeps it
+STOP_ROOM = 1.25  # a leverage's stop cap must clear 1 ATR by a quarter ATR, or the level bands swallow the window
 
 
 def get(path: str, **params):
@@ -57,8 +60,8 @@ def get(path: str, **params):
         except urllib.error.HTTPError as exc:
             if exc.code not in (408, 418, 429) and exc.code < 500:
                 raise
-        except urllib.error.URLError:
-            pass
+        except (OSError, http.client.HTTPException, ValueError):
+            pass  # URLError, and what urllib leaves unwrapped: a stalled read (TimeoutError), a dropped or cut body
         time.sleep(2 + 3 * attempt)
     raise RuntimeError(f"Binance unavailable after retries: {path}")
 
@@ -236,10 +239,27 @@ def above(price, level):
     return "-" if level is None else ("Y" if price > level else "n")
 
 
+def suggest_leverage(atr_pct: float | None, mmr: float, max_leverage: int) -> int | None:
+    """Highest leverage from max_leverage down to x2 whose stop cap clears 1 ATR by STOP_ROOM, None past x2.
+
+    Risk stays 1% of capital at any leverage (size comes from the stop distance); a lower one only ties up more
+    margin and moves liquidation further off.
+    """
+    if not atr_pct:
+        return None
+    return next((lev for lev in range(max_leverage, 1, -1)
+                 if max_stop_fraction(lev, mmr) * 100 >= atr_pct * STOP_ROOM), None)
+
+
 def _tag_row(row: dict, leverage: int) -> dict:
-    limit = max_stop_fraction(leverage, row["mmr"]) * 100
     pump = abs(row["chg24h"]) >= PUMP_CHANGE_24H or abs(row["fund"]) >= PUMP_FUNDING
-    row["flag"] = "PUMP" if pump else ("OK" if row["atr_pct"] and row["atr_pct"] <= limit else "ATR")
+    row["lev"] = suggest_leverage(row["atr_pct"], row["mmr"], leverage)
+    if pump:
+        row["flag"] = "PUMP"
+    elif row["lev"] is None:
+        row["flag"] = "ATR"
+    else:
+        row["flag"] = "OK" if row["lev"] == leverage else f"OKx{row['lev']}"
     return row
 
 
@@ -267,8 +287,9 @@ def scan(args) -> None:
     OUT.parent.mkdir(parents=True, exist_ok=True)
     OUT.write_text(json.dumps({"generated_at": datetime.now(timezone.utc).isoformat(),
                                "leverage": args.leverage, "rows": rows}, indent=1))
-    print(f"{len(rows)} contracts, x{args.leverage}: OK = ATR within the max stop, "
-          f"ATR = too volatile, PUMP = today's move/funding not in the ATR. Saved {OUT}")
+    print(f"{len(rows)} contracts: OK = room for a stop at x{args.leverage}, OKxN = ATR too wide for"
+          f" x{args.leverage}, run stops/plan with --leverage N (risk stays 1%), ATR = too volatile even at x2,"
+          f" PUMP = today's move/funding not in the ATR. Saved {OUT}")
     print(f"{'sym':<14}{'flag':>5}{'mark':>11}{'24h':>6}{'7d':>7}{'20d':>7}{'rsBTC':>7}{'>e20':>5}"
           f"{'e20>50':>7}{'>e200':>6}{'rsi1d':>6}{'rsi4h':>6}{'atr%':>6}{'resATR':>7}{'supATR':>7}"
           f"{'oi7d':>7}{'ls%':>5}{'top%':>5}{'tkr3d':>6}{'fund%':>9}")
@@ -320,17 +341,6 @@ def detail(args) -> None:
             t = datetime.fromtimestamp(k[0] / 1000, timezone.utc).strftime("%m-%d %HZ")
             print(f"   4h {t} {g(float(k[1]))}/{g(float(k[2]))}/{g(float(k[3]))}/{g(float(k[4]))}"
                   f" taker-buy {buy:.0f}%{'  LIVE, not closed' if k is bars[-1] else ''}")
-        if getattr(args, "kronos", False) and len(k1d_all) > 15:
-            try:
-                from kronos import format_mc_detail, simulate_paths
-                mc = simulate_paths(
-                    k1d_all[:-1], mark=m, symbol=sym,
-                    pred_len=args.horizon_days, sample_count=args.mc_samples, interval="1d",
-                )
-                for line in format_mc_detail(mc, a):
-                    print(line)
-            except Exception as exc:
-                print(f"  Kronos-small MC error: {exc}")
 
 
 def plan(args) -> None:
@@ -391,20 +401,6 @@ def plan(args) -> None:
     print(f"size {qty.normalize():f} (step {meta['step']}) notional {notional:.2f} margin "
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
-    mc_tg_line = None
-    if getattr(args, "kronos", False) and len(k1d) > 15:
-        try:
-            from kronos import evaluate_trade_paths, format_mc_plan, simulate_paths
-            mc = simulate_paths(
-                k1d[:-1], mark=mark, symbol=sym,
-                pred_len=args.horizon_days, sample_count=args.mc_samples, interval="1d",
-            )
-            ev = evaluate_trade_paths(mc, side=side, entry=entry, stop=args.stop, target=args.target, order=order)
-            mc_lines, mc_tg_line = format_mc_plan(mc, ev)
-            for line in mc_lines:
-                print(line)
-        except Exception as exc:
-            print(f"Kronos-small MC error: {exc}")
     for name, ok in checks.items():
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
     if hug:
@@ -437,8 +433,6 @@ def plan(args) -> None:
               f" | R:R: {reward_unit / risk_unit:.2f}")
         print(f"TG: • Size: {qty.normalize():f} ({notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f} (x{args.leverage})"
               f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
-        if mc_tg_line:
-            print(mc_tg_line)
         if order != "lệnh chờ (stop)":  # the desk cannot grade stop entries yet
             print(f"DESK: ~/crypto-desk-rewrite/scripts/desk log-call {side} {sym}"
                   f" --entry {entry:.10g} --stop {args.stop:.10g} --target {args.target:.10g}")
@@ -483,12 +477,6 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=6)
     p = sub.add_parser("detail")
     p.add_argument("symbols", nargs="+")
-    p.add_argument("--horizon-days", type=int, default=10)
-    p.add_argument("--mc-samples", type=int, default=30)
-    # 13/11 walk-forward check: daily Kronos-small forecasts were biased toward the 120-day mean and worse
-    # than a coin flip, so they are opt-in and must never grade a setup
-    p.add_argument("--kronos", action="store_true", help="experimental Kronos-small MC lines (uncalibrated)")
-    p.add_argument("--no-kronos", action="store_true", help=argparse.SUPPRESS)  # the old opt-out, now a no-op
     p = sub.add_parser("plan")
     p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])
     p.add_argument("symbol")
@@ -501,12 +489,6 @@ def main() -> None:
     p.add_argument("--margin-cap", type=float, default=0.20)
     p.add_argument("--min-rr", type=float, default=1.5)
     p.add_argument("--entry-band", type=float, default=0.005)
-    p.add_argument("--horizon-days", type=int, default=10)
-    p.add_argument("--mc-samples", type=int, default=30)
-    # 13/11 walk-forward check: daily Kronos-small forecasts were biased toward the 120-day mean and worse
-    # than a coin flip, so they are opt-in and must never grade a setup
-    p.add_argument("--kronos", action="store_true", help="experimental Kronos-small MC lines (uncalibrated)")
-    p.add_argument("--no-kronos", action="store_true", help=argparse.SUPPRESS)  # the old opt-out, now a no-op
     p = sub.add_parser("stops")
     p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])
     p.add_argument("symbol")

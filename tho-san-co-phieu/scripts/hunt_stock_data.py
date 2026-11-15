@@ -18,10 +18,12 @@ Commands:
       Google News RSS for global/US/Asia macro; per symbol Yahoo Finance RSS (direct links) + SEC 8-K/6-K of the
       last 30 days for US-listed filers, Google News by company name for the rest; all with dates
   python3 hunt_stock_data.py plan LONG|SHORT SYMBOL --stop X --target Y [--entry E] [--capital 1000] [--horizon-days 20]
-      checks mark-index deviation, ATR/liquidation stop bounds, R:R, earnings inside the holding window, and sizes position;
-      on PASS prints the TG: lines the report pastes verbatim and `Hạng tối đa` (B when the stop is within 0.25 ATR
-      of a daily high/low of the last 20 sessions, a pending order spans a US macro print from macro_events.json
-      at the skills repo root, or a pending entry sits over 1 ATR from mark); --log saves the order
+                             [--earnings-date YYYY-MM-DD] [--log]
+      checks mark-index deviation, ATR/liquidation stop bounds, R:R, earnings inside the holding window (the script's
+      date, or --earnings-date once news confirms one), and sizes position; on PASS prints the TG: lines the report
+      pastes verbatim and `Hạng tối đa` (B when the stop is within 0.25 ATR of a daily high/low of the last 20
+      sessions, a pending order spans a US macro print from macro_events.json at the skills repo root, or a pending
+      entry sits over 1 ATR from mark); --log saves the order, refused while 3 orders are open
   python3 hunt_stock_data.py stops LONG|SHORT SYMBOL [--span 0.07] [--step 0.005] [--leverage 5]
       walks entries away from the mark and prints the tightest stop plan would pass, with 1.5R/2R targets
   python3 hunt_stock_data.py orders [--days 20] [--cancel ID]
@@ -38,6 +40,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_FLOOR, Decimal
+import http.client
 import json
 import os
 from pathlib import Path
@@ -217,16 +220,19 @@ def get_binance(path: str, **params):
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return json.load(resp)
         except urllib.error.HTTPError as exc:
-            if exc.code not in (418, 429) and exc.code < 500:
+            if exc.code not in (408, 418, 429) and exc.code < 500:
                 raise
-        except urllib.error.URLError:
-            pass
+        except (OSError, http.client.HTTPException, ValueError):
+            pass  # URLError, and what urllib leaves unwrapped: a stalled read (TimeoutError), a dropped or cut body
         time.sleep(2 + 3 * attempt)
     raise RuntimeError(f"Binance unavailable after retries: {path}")
 
 
 def get_sec_json(url: str):
-    """Fetch JSON from SEC EDGAR respecting the <=10 req/sec rate limit and User-Agent policy."""
+    """Fetch JSON from SEC EDGAR respecting the <=10 req/sec rate limit and User-Agent policy.
+
+    Fundamentals are optional, so any SEC trouble (a 403 for a distrusted User-Agent, a stall) returns None
+    instead of stopping the hunt."""
     global _sec_last_call
     for attempt in range(4):
         with _sec_lock:
@@ -246,11 +252,9 @@ def get_sec_json(url: str):
             with urllib.request.urlopen(req, timeout=25) as resp:
                 return json.load(resp)
         except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                return None
             if exc.code not in (429, 500, 502, 503, 504):
-                raise
-        except urllib.error.URLError:
+                return None
+        except (OSError, http.client.HTTPException, ValueError):
             pass
         time.sleep(1.5 * (attempt + 1))
     return None
@@ -446,7 +450,7 @@ def fetch_sec_fundamentals(base_asset: str, sec_map: dict[str, tuple[int, str]])
     cik, title = sec_map[lookup]
     SEC_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     today_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
-    cache_path = SEC_CACHE_DIR / f"sec2_{cik:010d}_{today_tag}.json"
+    cache_path = SEC_CACHE_DIR / f"sec3_{cik:010d}_{today_tag}.json"  # sec3: 6-Ks no longer date earnings
     if cache_path.exists():
         try:
             data = json.loads(cache_path.read_text())
@@ -463,10 +467,11 @@ def fetch_sec_fundamentals(base_asset: str, sec_map: dict[str, tuple[int, str]])
     f_dates = recent.get("filingDate", [])
     items = recent.get("items", [])
 
+    # Item 2.02 dates US results; a 6-K has no item codes (monthly sales, notices, results alike), so it dates nothing
     earnings_8k_dates = [
         f_dates[i]
         for i in range(min(len(forms), len(f_dates), len(items)))
-        if (forms[i] == "8-K" and "2.02" in str(items[i])) or forms[i] == "6-K"
+        if forms[i] == "8-K" and "2.02" in str(items[i])
     ]
     last_earnings_date = earnings_8k_dates[0] if earnings_8k_dates else None
     next_earnings_est = None
@@ -481,7 +486,7 @@ def fetch_sec_fundamentals(base_asset: str, sec_map: dict[str, tuple[int, str]])
         while (est_dt - today_dt).days < -15:
             est_dt += timedelta(days=91)
         next_earnings_est = est_dt.isoformat()
-        days_to_earnings = (est_dt - today_dt).days
+        days_to_earnings = max(0, (est_dt - today_dt).days)  # due but not filed yet: imminent, not "no earnings"
 
     facts_resp = get_sec_json(f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json")
     facts = (facts_resp or {}).get("facts", {})
@@ -729,13 +734,32 @@ def save_orders(orders: list[dict]) -> None:
     os.replace(tmp, ORDERS)
 
 
+MAX_OPEN_ORDERS = 3  # SKILL "tối đa 3 lệnh": orders waiting to fill plus filled ones still running
+
+
+def is_open(o: dict, now: datetime) -> bool:
+    """Waiting to fill, or filled and not yet at its stop or target, judged from Binance bars."""
+    created = datetime.fromisoformat(o["created_at"])
+    if o.get("canceled_at") or created < now - timedelta(days=20):
+        return False
+    status = order_status(o, _klines_since(o["symbol"], "5m", created, 300),
+                          _klines_since(o["symbol"], "1h", created, 1000), o["entry"], now)
+    return status.startswith("CHỜ") or "đang chạy" in status
+
+
 def log_order(o: dict) -> str:
-    """Save a PASS order so the next hunt still sees it; the same live call keeps its first id."""
+    """Save a PASS order so the next hunt still sees it; the same live call keeps its first id, and a fourth
+    open order is refused, as the crypto desk refuses a fourth call."""
     orders, now = load_orders(), datetime.now(timezone.utc)
     for old in orders:
         if (all(old[k] == o[k] for k in ("symbol", "side", "entry", "stop", "target"))
                 and "canceled_at" not in old and datetime.fromisoformat(old["expires_at"]) > now):
             return f"LOG: trùng #{old['id']} (giữ lệnh cũ, không ghi thêm)"
+    live = [x for x in orders if is_open(x, now)]
+    if len(live) >= MAX_OPEN_ORDERS:
+        ids = ", ".join(f"#{x['id']}" for x in live)
+        raise SystemExit(f"LOG: từ chối, sổ đã có {len(live)} lệnh mở ({ids}): hủy lệnh chờ yếu nhất bằng"
+                         " `orders --cancel ID` rồi chạy lại, hoặc đưa lệnh này vào Đã loại")
     o.update(id=max((x["id"] for x in orders), default=0) + 1, created_at=now.isoformat(),
              expires_at=(now + timedelta(hours=24)).isoformat())
     save_orders(orders + [o])
@@ -762,7 +786,7 @@ def fill_time(o: dict, k5m: list) -> datetime | None:
 
 def order_status(o: dict, k5m: list, k1h: list, mark: float, now: datetime) -> str:
     """Where a logged order stands. Bars carry no tick order, so a bar touching both counts the stop, and the
-    fill hour can't count a target it may have traded before the fill."""
+    bar holding the fill can't count a target it may have traded before the fill."""
     if o.get("canceled_at"):
         return f"ĐÃ HỦY {ict(datetime.fromisoformat(o['canceled_at']))}"
     filled = fill_time(o, k5m)
@@ -773,13 +797,17 @@ def order_status(o: dict, k5m: list, k1h: list, mark: float, now: datetime) -> s
     sign = 1 if o["side"] == "LONG" else -1
     risk = (o["entry"] - o["stop"]) * sign
     head = f"KHỚP {ict(filled)}"
-    for k in k1h:
+    # Binance starts 1h bars at the first full hour after startTime, so 5m bars cover the rest of that hour
+    first_hour = _bar_time(k1h[0]) if k1h else now
+    bars = ([(k, timedelta(minutes=5)) for k in k5m if _bar_time(k) < first_hour]
+            + [(k, timedelta(hours=1)) for k in k1h])
+    for k, span in bars:
         t, high, low = _bar_time(k), float(k[2]), float(k[3])
-        if t + timedelta(hours=1) <= filled:
+        if t + span <= filled:
             continue
         if (low <= o["stop"]) if sign > 0 else (high >= o["stop"]):
             return f"{head} · chạm stop {ict(t)} (-1.00R)"
-        if not t <= filled < t + timedelta(hours=1) and ((high >= o["target"]) if sign > 0 else (low <= o["target"])):
+        if not t <= filled < t + span and ((high >= o["target"]) if sign > 0 else (low <= o["target"])):
             return f"{head} · chạm TP {ict(t)} ({(o['target'] - o['entry']) * sign / risk:+.2f}R)"
     return f"{head} · đang chạy {(mark - o['entry']) * sign / risk:+.2f}R (mark {mark:.6g})"
 
@@ -814,10 +842,15 @@ def features(sym: str, meta: dict, ticker: dict, premium: dict, spy_chg20: float
     index_price = float(premium.get("indexPrice") or mark)
     mark_index_dev_pct = abs(mark - index_price) / index_price * 100 if index_price else 0.0
     a = atr(h, lo, c)
-    sh, sl = swings(h, lo) if len(h) >= 5 else ([], [])
+    sh, sl = swings(h, lo, lookback=len(h))  # every loaded session; plan's stop check stays at 120
+    hi20, lo20 = max(h[-20:], default=mark), min(lo[-20:], default=mark)
+    hi55, lo55 = max(h[-55:], default=mark), min(lo[-55:], default=mark)
+    # A swing needs two later sessions, so a fresh 20/55-session extreme is not one yet; without it a
+    # breakout past every swing leaves that side empty.
+    levels = sh + sl + [hi20, lo20, hi55, lo55]
     min_gap = (a or 0) * 0.25
-    res_candidates = sorted(x for x in (sh + sl) if x > mark)
-    sup_candidates = sorted((x for x in (sl + sh) if x < mark), reverse=True)
+    res_candidates = sorted(x for x in levels if x > mark)
+    sup_candidates = sorted((x for x in levels if x < mark), reverse=True)
     oi = [float(x["sumOpenInterestValue"]) for x in get_binance(
         "/futures/data/openInterestHist", symbol=sym, period="1d", limit=30)]
     ls = [float(x["longShortRatio"]) for x in get_binance(
@@ -842,10 +875,7 @@ def features(sym: str, meta: dict, ticker: dict, premium: dict, spy_chg20: float
         "ema20_4h": ema(c4, 20), "ema50_4h": ema(c4, 50),
         "rsi1d": rsi(c), "rsi4h": rsi(c4),
         "atr": a, "atr_pct": None if not a else a / mark * 100,
-        "hi20": max(h[-20:]) if len(h) >= 20 else (max(h) if h else mark),
-        "lo20": min(lo[-20:]) if len(lo) >= 20 else (min(lo) if lo else mark),
-        "hi55": max(h[-55:]) if len(h) >= 55 else (max(h) if h else mark),
-        "lo55": min(lo[-55:]) if len(lo) >= 55 else (min(lo) if lo else mark),
+        "hi20": hi20, "lo20": lo20, "hi55": hi55, "lo55": lo55,
         "res": decluster(res_candidates, min_gap)[:3],
         "sup": decluster(sup_candidates, min_gap)[:3],
         "vol7_vs_30": round((sum(v[-7:]) / 7) / (sum(v[-30:]) / 30), 2) if len(v) >= 30 and sum(v[-30:]) > 0 else None,
@@ -1081,19 +1111,6 @@ def detail(args) -> None:
             t = datetime.fromtimestamp(k[0] / 1000, timezone.utc).strftime("%m-%d %HZ")
             print(f"   4h {t} {g(float(k[1]))}/{g(float(k[2]))}/{g(float(k[3]))}/{g(float(k[4]))}"
                   f" taker-buy {buy:.0f}%{'  LIVE, not closed' if k is bars[-1] else ''}")
-        d_closed = weekday_bars(k1d_all[:-1])
-        if getattr(args, "kronos", False) and len(d_closed) >= 15:
-            try:
-                from kronos import format_mc_detail, simulate_paths
-                mc = simulate_paths(
-                    d_closed, mark=m, symbol=sym,
-                    pred_len=args.horizon_days, sample_count=args.mc_samples,
-                    interval="1d", weekdays_only=True,
-                )
-                for line in format_mc_detail(mc, a):
-                    print(line)
-            except Exception as exc:
-                print(f"  Kronos-small MC error: {exc}")
 
 
 def _rss_items(url: str, limit: int) -> list[dict[str, str]]:
@@ -1141,9 +1158,11 @@ EIGHT_K_ITEMS = {
 EIGHT_K_KEY = {"1.01", "1.03", "1.05", "2.01", "2.02", "2.03", "2.06", "3.01", "4.02", "5.02"}
 
 
-def recent_current_reports(cik: int, days: int = 30) -> list[str]:
-    """8-K/6-K filings of the last `days` days as printable lines, newest first."""
-    sub = get_sec_json(f"https://data.sec.gov/submissions/CIK{cik:010d}.json") or {}
+def recent_current_reports(cik: int, days: int = 30) -> list[str] | None:
+    """8-K/6-K filings of the last `days` days as printable lines, newest first; None when SEC does not answer."""
+    sub = get_sec_json(f"https://data.sec.gov/submissions/CIK{cik:010d}.json")
+    if sub is None:
+        return None
     recent = sub.get("filings", {}).get("recent", {})
     since = (datetime.now(timezone.utc).date() - timedelta(days=days)).isoformat()
     columns = ("form", "filingDate", "items", "accessionNumber", "primaryDocument")
@@ -1152,7 +1171,8 @@ def recent_current_reports(cik: int, days: int = 30) -> list[str]:
         if form not in ("8-K", "6-K") or filed < since:
             continue
         codes = [c for c in str(items).split(",") if c]
-        flag = " !" if EIGHT_K_KEY & set(codes) else ""
+        # a 6-K has no item codes, so results, deals and notices look alike: marked to open
+        flag = " ?" if form == "6-K" else (" !" if EIGHT_K_KEY & set(codes) else "")
         what = ", ".join(f"{c} {EIGHT_K_ITEMS.get(c, '')}".strip() for c in codes)
         lines.append(f"  [{filed}] {form}{flag} {what}".rstrip())
         lines.append(f"    https://www.sec.gov/Archives/edgar/data/{cik}/{acc.replace('-', '')}/{doc}")
@@ -1210,8 +1230,10 @@ def news(args) -> None:
             print(f"    {item['link']}")
         if label in filers:
             print(f"\n=== SEC 8-K/6-K 30 ngày: {label} (! = KQKD, lãnh đạo, hợp đồng lớn, M&A, nợ mới,"
-                  " suy giảm tài sản, hủy niêm yết, BCTC sai, phá sản, an ninh mạng) ===")
-            print("\n".join(recent_current_reports(filers[label])) or "  (no filings)")
+                  " suy giảm tài sản, hủy niêm yết, BCTC sai, phá sản, an ninh mạng; ? = 6-K không có mã mục,"
+                  " mở để biết nội dung) ===")
+            lines = recent_current_reports(filers[label])
+            print("  (SEC không trả lời: mở EDGAR bằng tay)" if lines is None else "\n".join(lines) or "  (no filings)")
 
 
 def plan(args) -> None:
@@ -1257,6 +1279,10 @@ def plan(args) -> None:
         raise SystemExit(f"{side}: stop and target are on the wrong side of entry {entry}")
     fee_unit = entry * TAKER_FEE_ROUNDTRIP
     net_rr = (reward_unit - fee_unit) / (risk_unit + fee_unit)
+    if args.earnings_date:  # confirmed by news: beats the script's date, which may be an estimate
+        fnd["next_earnings_date"] = args.earnings_date
+        fnd["days_to_earnings"] = (datetime.fromisoformat(args.earnings_date).date()
+                                   - datetime.now(timezone.utc).date()).days
     d_to = fnd.get("days_to_earnings")
     band = STOP_CLEARANCE_ATR * a
     near = within(veto, args.stop, band)
@@ -1293,28 +1319,14 @@ def plan(args) -> None:
     print(f"size {qty.normalize():f} (step {meta['step']}) notional {notional:.2f} margin "
           f"{notional / args.leverage:.2f} risk {float(qty) * risk_unit:.2f} reward "
           f"{float(qty) * reward_unit:.2f} USDT | liquidation ~{liq:.6g}")
-    mc_tg_line = None
-    d_closed = weekday_bars(k1d[:-1])
-    if getattr(args, "kronos", False) and len(d_closed) >= 15:
-        try:
-            from kronos import evaluate_trade_paths, format_mc_plan, simulate_paths
-            mc = simulate_paths(
-                d_closed, mark=mark, symbol=sym,
-                pred_len=args.horizon_days, sample_count=args.mc_samples,
-                interval="1d", weekdays_only=True,
-            )
-            ev = evaluate_trade_paths(mc, side=side, entry=entry, stop=args.stop, target=args.target, order=order)
-            mc_lines, mc_tg_line = format_mc_plan(mc, ev)
-            for line in mc_lines:
-                print(line)
-        except Exception as exc:
-            print(f"Kronos-small MC error: {exc}")
     d_since = fnd.get("days_since_earnings")
     if d_to is not None and 0 <= d_to <= 7:
         print(f"⚠️ CẢNH BÁO KQKD: Dự kiến công bố KQKD trong {d_to} ngày ({fnd.get('next_earnings_date')})")
     elif fnd.get("last_earnings_date") or fnd.get("next_earnings_date"):
         print(f"KQKD: Gần nhất {fnd.get('last_earnings_date') or '-'} ({d_since if d_since is not None else '-'}d trước) "
               f"| Kế tiếp: {fnd.get('next_earnings_date') or '-'} (còn ~{d_to if d_to is not None else '-'}d)")
+    if d_to is None and fnd["market"] != "PRE":
+        print("⚠️ chưa rõ ngày KQKD kế tiếp: xác nhận bằng tin, rồi chạy lại plan với --earnings-date YYYY-MM-DD")
     for name, ok in checks.items():
         print(f"  {'PASS' if ok else 'FAIL'}  {name}")
     if hug:
@@ -1351,8 +1363,6 @@ def plan(args) -> None:
               f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
         print(f"TG: • Cơ bản & KQKD: Rev YoY {'-' if rev is None else f'{rev:+.1f}%'}, P/E {fmt(pe, 1)}"
               f" | KQKD: {fnd.get('next_earnings_date') or '-'}{'' if d_to is None else f' (còn ~{d_to}d)'}")
-        if mc_tg_line:
-            print(mc_tg_line)
         if args.log:
             print(log_order({
                 "symbol": sym, "side": side, "entry": entry, "stop": args.stop, "target": args.target,
@@ -1436,12 +1446,6 @@ def main() -> None:
     p.add_argument("--workers", type=int, default=6)
     p = sub.add_parser("detail")
     p.add_argument("symbols", nargs="+")
-    p.add_argument("--horizon-days", type=int, default=20)
-    p.add_argument("--mc-samples", type=int, default=30)
-    # 13/11 walk-forward check: daily Kronos-small forecasts were biased toward the 120-day mean and worse
-    # than a coin flip, so they are opt-in and must never grade a setup
-    p.add_argument("--kronos", action="store_true", help="experimental Kronos-small MC lines (uncalibrated)")
-    p.add_argument("--no-kronos", action="store_true", help=argparse.SUPPRESS)  # the old opt-out, now a no-op
     p = sub.add_parser("news")
     p.add_argument("symbols", nargs="*")
     p.add_argument("--limit", type=int, default=6)
@@ -1458,12 +1462,9 @@ def main() -> None:
     p.add_argument("--min-rr", type=float, default=1.5)
     p.add_argument("--entry-band", type=float, default=0.005)
     p.add_argument("--horizon-days", type=int, default=20)
-    p.add_argument("--mc-samples", type=int, default=30)
-    # 13/11 walk-forward check: daily Kronos-small forecasts were biased toward the 120-day mean and worse
-    # than a coin flip, so they are opt-in and must never grade a setup
-    p.add_argument("--kronos", action="store_true", help="experimental Kronos-small MC lines (uncalibrated)")
-    p.add_argument("--no-kronos", action="store_true", help=argparse.SUPPRESS)  # the old opt-out, now a no-op
-    p.add_argument("--log", action="store_true", help="save a PASS order to the ledger `orders` reads")
+    p.add_argument("--earnings-date", metavar="YYYY-MM-DD", help="next earnings date confirmed by news")
+    p.add_argument("--log", action="store_true",
+                   help="save a PASS order to the ledger `orders` reads (refused past 3 open orders)")
     p = sub.add_parser("stops")
     p.add_argument("side", choices=["LONG", "SHORT", "long", "short"])
     p.add_argument("symbol")
