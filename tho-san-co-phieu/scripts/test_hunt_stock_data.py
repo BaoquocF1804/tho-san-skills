@@ -788,3 +788,41 @@ def test_orders_stats_grades_the_whole_ledger(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "orders", "--stats"])
     h.main()
     assert "Đã đóng 1: thắng 1, thua 0, tổng +0.24R" in capsys.readouterr().out
+
+
+# --- 21/11 a market SHORT printed "Vào: 144.7345863 | … | Chốt 1/2: 133.8691726": the mark is off the tick grid ---
+
+def _mark(monkeypatch, price: str) -> None:
+    """Binance's mark and index sit at this off-grid price; everything else keeps the faked exchange."""
+    inner = h.get_binance
+
+    def get_binance(path: str, **params):
+        if path == "/fapi/v1/premiumIndex":
+            return {"symbol": params["symbol"], "markPrice": price, "indexPrice": price, "lastFundingRate": "0"}
+        return inner(path, **params)
+
+    monkeypatch.setattr(h, "get_binance", get_binance)
+
+
+@pytest.mark.parametrize("side, stop, target, entry, half", [
+    ("LONG", "95", "110", "100.01", "105.02"),  # a buy fills at the tick above the mark
+    ("SHORT", "105", "90", "100", "95"),  # a sell at the tick below it
+])
+def test_plan_puts_a_market_entry_on_the_okx_tick(monkeypatch, capsys, tmp_path, side, stop, target, entry, half):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    _mark(monkeypatch, "100.00737")
+    monkeypatch.setattr(h, "ORDERS", tmp_path / "orders.json", raising=False)
+    out = _plan(monkeypatch, capsys, "--stop", stop, "--target", target, "--log", side=side)
+    line = next(x for x in out.splitlines() if x.startswith("TG: • Vào:"))
+    assert line.startswith(f"TG: • Vào: {entry} | Stop: {stop} (") and line.endswith(f" | Chốt 1/2: {half}")
+    assert json.loads((tmp_path / "orders.json").read_text())[0]["entry"] == float(entry)
+
+
+def test_plan_rounds_every_level_to_a_coarser_okx_tick(monkeypatch, capsys):
+    # OKX quotes LLY, SKHYNIX, ASML and MELI in 0.1 steps while Binance uses 0.01: a 0.01 price is no OKX order.
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    _fake_okx(monkeypatch, [{**_okx_stock("TEST"), "tickSz": "0.1"}])
+    out = _plan(monkeypatch, capsys, "--entry", "99.03", "--stop", "94.86", "--target", "110.04")
+    line = next(x for x in out.splitlines() if x.startswith("TG: • Vào:"))
+    # entry up (the worse buy), stop away from it, target toward it: the plan never looks better than OKX allows
+    assert line.startswith("TG: • Vào: 99.1 | Stop: 94.8 (") and " | TP: 110 (" in line and line.endswith(" | Chốt 1/2: 103.4")

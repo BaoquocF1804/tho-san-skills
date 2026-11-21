@@ -63,6 +63,7 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
    - `plan` và `stops` từ chối mã không đặt được trên OKX (`không đặt được trên OKX`): bỏ mã đó.
    - Dòng Size tính theo **số hợp đồng OKX**, ví dụ `0.81 hợp đồng NVDA-USDT-SWAP (0.81 NVDA ≈ 128.39 USDT)`; người dùng đặt đúng số hợp đồng này trên OKX. Gặp `FAIL size >= OKX minimum` hoặc `FAIL … OKX max leverage` thì đổi đòn bẩy hoặc bỏ lệnh.
    - Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark.
+   - `plan` làm tròn giá vào, stop và TP theo bước giá của OKX (có mã như LLY, SKHYNIX, ASML, MELI bước 0,1, trong khi Binance là 0,01). Giá vào được làm tròn về phía khớp xấu hơn, stop ra xa giá vào, TP lại gần giá vào. Vì vậy dòng `TG:` có thể khác vài bước giá so với số đã truyền vào; dán nguyên dòng đó.
    - `PASS` thì `plan` in `Hạng tối đa` và 4 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R/Chốt 1/2; Size/Ký quỹ/Rủi ro/Thanh lý; Cơ bản & KQKD). Báo cáo dán nguyên văn các dòng này (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu. Không gõ lại con số nào. Độ lệch mark–index và dòng KQKD cũng chép từ output.
    - Lần `plan` cuối của mỗi lệnh đưa vào báo cáo phải thêm `--log`:
      - `LOG: #id`: lệnh mới.

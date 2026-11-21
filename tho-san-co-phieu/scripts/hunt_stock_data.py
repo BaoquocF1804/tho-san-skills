@@ -42,7 +42,7 @@ import argparse
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-from decimal import ROUND_FLOOR, Decimal
+from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal
 import http.client
 import json
 import os
@@ -715,6 +715,12 @@ def within(levels: list[float], price: float, band: float) -> list[float]:
     return [x for x in levels if abs(x - price) < band]
 
 
+def to_tick(price: float, tick: str, up: bool) -> float:
+    """price on a venue's tick grid, rounded up or down."""
+    t = Decimal(tick)
+    return float((Decimal(str(price)) / t).to_integral_value(rounding=ROUND_CEILING if up else ROUND_FLOOR) * t)
+
+
 def market_trend(market: str) -> tuple[str, float, float]:
     """The index perp that decides which side may trade: its last closed weekday close and the EMA20 of those."""
     proxy = TREND_PROXIES.get(market, "QQQUSDT")
@@ -1377,17 +1383,22 @@ def plan(args) -> None:
     proxy, p_close, p_ema = market_trend(fnd["market"])
     entry, note = args.entry or mark, ""
     sign = 1 if side == "LONG" else -1
+    up, tick = side == "LONG", meta["tick_sz"]
     if abs(entry / mark - 1) <= args.entry_band:
         order = "vào ngay"
         # A market order fills around the mark: size it from whichever of the two is worse.
         worse = max(entry, mark) if side == "LONG" else min(entry, mark)
         if worse != entry:
-            note = f"vào ngay khớp quanh mark: tính từ {worse:.10g} thay vì entry {entry:.10g}"
+            note = f"vào ngay khớp quanh mark: tính từ {to_tick(worse, tick, up):.10g} thay vì entry {entry:.10g}"
             entry = worse
     elif (side == "LONG" and entry < mark) or (side == "SHORT" and entry > mark):
         order = "lệnh chờ (limit)"
     else:
         order = "lệnh chờ (stop)"
+    # OKX only takes prices on its tick grid (0.1 for LLY and SKHYNIX where Binance quotes 0.01). Round each level
+    # the way that never flatters the plan: the entry to the worse fill, the stop away from it, the target toward it.
+    entry = to_tick(entry, tick, up)
+    args.stop, args.target = to_tick(args.stop, tick, not up), to_tick(args.target, tick, not up)
     risk_unit, reward_unit = (entry - args.stop) * sign, (args.target - entry) * sign
     limit = max_stop_fraction(args.leverage, meta["mmr"])
     if risk_unit <= 0 or reward_unit <= 0:

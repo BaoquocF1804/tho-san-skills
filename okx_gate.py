@@ -46,7 +46,7 @@ def swaps(category: str) -> dict[str, dict]:
     usdt_24h = {x["instId"]: float(x["volCcy24h"] or 0) * float(x["last"] or 0)
                 for x in get("/api/v5/market/tickers", instType="SWAP")}
     return {i["instFamily"].removesuffix("-USDT"): {
-        "okx": i["instId"], "ct_val": i["ctVal"], "lot_sz": i["lotSz"], "min_sz": i["minSz"],
+        "okx": i["instId"], "ct_val": i["ctVal"], "lot_sz": i["lotSz"], "min_sz": i["minSz"], "tick_sz": i["tickSz"],
         "okx_max_lev": int(i["lever"] or 0), "okx_mark": marks[i["instId"]], "okx_qv": usdt_24h.get(i["instId"], 0.0),
     } for i in get("/api/v5/public/instruments", instType="SWAP")
         if i["settleCcy"] == "USDT" and i["state"] == "live" and i.get("instCategory") == category
