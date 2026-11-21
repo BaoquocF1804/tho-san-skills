@@ -24,10 +24,11 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
 | Độ lệch mark–index | ≤ 0,5% (vượt thì cờ `INDEX`, đứng ngoài) |
 | Stop | ≥ 1 ATR14 ngày, ≤ `(1/đòn bẩy − mmr)/2` (8,75% ở x5) và cách mọi đỉnh/đáy ngày ≥ 0,25 ATR (`plan` tự kiểm: sát swing 120 phiên hoặc đỉnh/đáy 2 phiên gần nhất thì `FAIL`; sát đỉnh/đáy bất kỳ trong 20 phiên thì `WARN` và hạ trần hạng). ATR và mọi chỉ báo ngày/4h chỉ tính nến T2–T6, vì cuối tuần sàn cơ sở đóng và giá gần như đứng |
 | R:R gộp | ≥ 1,5 (`plan` in thêm `net R:R` sau phí taker 2 chiều 0,10%) |
+| Chốt lời | Lãi tới +1R thì chốt một nửa, dời stop phần còn lại về giá vào. Dòng `TG:` thứ hai có `Chốt 1/2: <giá>` để người dùng đặt sẵn lệnh chốt một nửa trên OKX; `orders` chấm điểm theo luật này (giá quay về giá vào sau khi chốt = +0,5R). Lý do: 30/10–20/11, 3/9 lệnh khớp từng lãi tới +1R, hai trong số đó quay về stop, và chưa lệnh nào chạm TP |
 | Vào ngay | entry trong ±0,5% giá mark; xa hơn là lệnh chờ (`limit` nếu chờ hồi, `stop` nếu đánh phá vỡ) |
 | KQKD | Không giữ lệnh qua ngày KQKD: `plan` FAIL nếu KQKD rơi vào `--horizon-days` (mặc định 20). Muốn vào trước KQKD thì rút `--horizon-days` để đóng trước ngày đó và ghi vào **Sai nếu**; không thì bỏ lệnh. Ngày đã xác nhận bằng tin thì truyền `--earnings-date YYYY-MM-DD`; nó thay ngày của script |
 | Xu hướng thị trường | `plan` FAIL lệnh LONG khi QQQ (mã `KR`: EWY) đóng cửa ngày gần nhất dưới EMA20, FAIL lệnh SHORT khi trên EMA20. Dòng `Xu hướng` của `scan` cho biết chiều nào được dựng. Lý do: 30/10–20/11 QQQ đóng dưới EMA20 mọi phiên, và cả 7 lệnh LONG khớp đều chạm stop |
-| Tầm nhìn | ≤ 20 ngày; tối đa 3 lệnh mở cùng lúc (lệnh chờ khớp cộng lệnh đã khớp đang chạy), tối đa 2 lệnh cùng chiều, không có 2 lệnh cùng mã cùng chiều. `plan --log` từ chối lệnh vượt các mức này |
+| Tầm nhìn | ≤ 20 ngày (`--horizon-days`, lưu vào sổ). Hết hạn giữ mà lệnh chưa đóng thì `orders` đóng nó ở giá đóng cửa cuối cùng trong hạn (`hết N ngày`); người dùng đóng lệnh thật lúc đó. Tối đa 3 lệnh mở cùng lúc (lệnh chờ khớp cộng lệnh đã khớp đang chạy), tối đa 2 lệnh cùng chiều, không có 2 lệnh cùng mã cùng chiều. `plan --log` từ chối lệnh vượt các mức này |
 | Hạng | `plan` in `Hạng tối đa`. Là B khi stop dính `WARN`, khi lệnh chờ có 24 giờ hiệu lực trùm một sự kiện vĩ mô Mỹ (CPI, PPI, việc làm, FOMC; lịch nằm ở `macro_events.json`, gốc repo skills), hoặc khi entry chờ cách mark hơn 1 ATR. Báo cáo được hạ hạng, **không được nâng** |
 
 ## Quy trình
@@ -62,17 +63,20 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
    - `plan` và `stops` từ chối mã không đặt được trên OKX (`không đặt được trên OKX`): bỏ mã đó.
    - Dòng Size tính theo **số hợp đồng OKX**, ví dụ `0.81 hợp đồng NVDA-USDT-SWAP (0.81 NVDA ≈ 128.39 USDT)`; người dùng đặt đúng số hợp đồng này trên OKX. Gặp `FAIL size >= OKX minimum` hoặc `FAIL … OKX max leverage` thì đổi đòn bẩy hoặc bỏ lệnh.
    - Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark.
-   - `PASS` thì `plan` in `Hạng tối đa` và 4 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý; Cơ bản & KQKD). Báo cáo dán nguyên văn các dòng này (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu. Không gõ lại con số nào. Độ lệch mark–index và dòng KQKD cũng chép từ output.
+   - `PASS` thì `plan` in `Hạng tối đa` và 4 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R/Chốt 1/2; Size/Ký quỹ/Rủi ro/Thanh lý; Cơ bản & KQKD). Báo cáo dán nguyên văn các dòng này (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu. Không gõ lại con số nào. Độ lệch mark–index và dòng KQKD cũng chép từ output.
    - Lần `plan` cuối của mỗi lệnh đưa vào báo cáo phải thêm `--log`:
      - `LOG: #id`: lệnh mới.
      - `LOG: trùng #id`: lệnh cũ còn hiệu lực, báo cáo ghi "giữ #id".
      - `LOG: từ chối, sổ đã có 3 lệnh mở`: hủy lệnh chờ yếu nhất (`orders --cancel ID`) rồi chạy lại, hoặc đưa lệnh này vào **Đã loại** với lý do đủ 3 lệnh.
      - `LOG: từ chối, đã có #id <chiều> <MÃ> đang mở`: mỗi ý tưởng chỉ một lệnh, báo cáo ghi "giữ #id". Muốn đổi mức của lệnh còn chờ khớp thì `orders --cancel ID` rồi chạy lại.
      - `LOG: từ chối, sổ đã có 2 lệnh <chiều> mở`: hủy lệnh chờ yếu nhất cùng chiều rồi chạy lại, hoặc đưa lệnh này vào **Đã loại** với lý do đủ 2 lệnh cùng chiều.
-6. **Lệnh cũ:** chạy `hunt_stock_data.py orders`. Nó đọc sổ lệnh 20 ngày ở `~/.local/share/tho-san-co-phieu/orders.json` và tính trạng thái từ nến Binance. Không lấy lệnh cũ từ file báo cáo.
+6. **Lệnh cũ:** chạy `hunt_stock_data.py orders`. Nó đọc các lệnh tạo trong 30 ngày (`--days`) ở `~/.local/share/tho-san-co-phieu/orders.json` và tính trạng thái từ nến Binance. Không lấy lệnh cũ từ file báo cáo.
    - `CHỜ`: quyết định giữ, hủy (`orders --cancel ID`), hoặc thay (hủy trước, rồi `plan --log` lệnh mới).
-   - `KHỚP … đang chạy` / `chạm TP` / `chạm stop`: lệnh đã khớp trên giấy. Hỏi người dùng có vào thật không, nêu R hiện tại và mức đóng sớm. `orders --cancel` sẽ từ chối các lệnh này.
+   - `KHỚP … đang chạy … · chốt 1/2 ở <giá>`: lệnh đã khớp trên giấy, chưa tới +1R. Hỏi người dùng có vào thật không, nêu R hiện tại, giá chốt một nửa và mức đóng sớm. `orders --cancel` sẽ từ chối các lệnh đã khớp.
+   - `chốt 1/2 ở +1R …, stop dời về <giá vào> · đang chạy`: nhắc người dùng chốt một nửa và dời stop về giá vào nếu chưa làm.
+   - `chạm TP` / `chạm stop` / `về hòa vốn` / `hết N ngày`: lệnh đã đóng trên giấy, R ghi trong ngoặc.
    - `HẾT HẠN` / `ĐÃ HỦY`: bỏ qua.
+   - Người dùng hỏi hiệu quả của thợ săn thì chạy `orders --stats`. Lệnh này chấm toàn bộ sổ: tỷ lệ khớp của lệnh chờ, số lệnh thắng/thua, tổng R, R đang chạy, và R tách theo chiều, hạng, thị trường.
 
 ## Báo cáo trên khung chat (tiếng Việt)
 Báo cáo là đúng khung dưới đây: các mục này, theo thứ tự này. Chữ trong `<...>` là chỗ điền; mục không có gì thì ghi "Không có.". Bối cảnh tối đa 5 dòng, mỗi dòng có ngày. Hạng của mỗi lệnh không vượt `Hạng tối đa` mà `plan` in ra.
@@ -148,6 +152,7 @@ _Phân tích tham khảo, không phải lời khuyên đầu tư._
 | Ba lệnh cùng chiều cùng nhóm ngành (bán dẫn/AI) không cảnh báo | `plan --log` chỉ cho 2 lệnh cùng chiều; 2 lệnh đó cùng nhóm ngành thì nêu tương quan trong **Quản lý rủi ro** |
 | Mua bắt đáy liên tục khi thị trường giảm (30/10–20/11: 7/7 lệnh LONG khớp chạm stop; lệnh mua dưới giá khớp 7/10 lần, lệnh bán trên giá chỉ 2/7, vì giá giảm chỉ chạm lệnh mua) | Dựng theo dòng `Xu hướng`; `plan` FAIL lệnh ngược xu hướng QQQ/EWY. Không đổi mã proxy, không bỏ qua dòng FAIL |
 | Ghi lại cùng một ý tưởng nhiều lần (AVGO LONG được gọi 4 lần từ 30/10 tới 13/11; #2 vào khi lệnh 12/11 đã khớp) | `plan --log` từ chối lệnh thứ hai cùng mã cùng chiều: quản lý lệnh đang có, không mở thêm |
+| Giữ nguyên cả lệnh chờ TP xa dù đã lãi +1R (AVGO 326 lên +1,01R, AVGO 348,5 lên +1,20R, rồi cả hai về stop) | Chốt một nửa ở giá `Chốt 1/2` của dòng `TG:`, dời stop phần còn lại về giá vào |
 | Chỉ soi và chỉ báo cáo chip/AI (các lượt săn 06–13/11 chỉ ra AVGO, TSM, META, GOOGL, TSLA), vì `scan` từng cắt ở 40 mã mà 29/40 là công nghệ | Quét toàn bộ, không tự thêm `--top`; chọn mã soi kỹ theo bước 3 (tối đa 3 mã/ngành, ít nhất 1–2 mã ngoài bán dẫn/AI khi có) |
 | Bỏ mã `OKxN` vì nghĩ là "quá biến động", hoặc chạy `plan` ở x5 cho mã `OKx3` | `OKxN` vẫn giao dịch được: chạy `stops` / `plan` với `--leverage N` và dán dòng Size có `(xN)` |
 | Đề xuất mã chỉ có trên Binance (Tencent, ANET…), hoặc tự quy đổi size từ cổ phiếu sang hợp đồng | Chỉ chọn mã có trong bảng `scan`; `plan` chặn mã không có trên OKX; dán nguyên dòng Size (đã là số hợp đồng OKX) |

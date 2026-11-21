@@ -191,6 +191,7 @@ def test_plan_prints_the_lines_the_report_copies(monkeypatch, capsys):
     lines = [line for line in out.splitlines() if line.startswith("TG:")]
     assert lines[0] == "TG: 🟢 LONG TESTUSDT [US] (TEST) — Vào ngay"
     assert lines[1].startswith("TG: • Vào: 100 | Stop: 95 (-5.00%, ")
+    assert lines[1].endswith(" | Chốt 1/2: 105")  # +1R, where half the position comes off
     assert lines[2].startswith("TG: • Size: ")
     assert lines[3] == "TG: • Cơ bản & KQKD: Rev YoY -, P/E - | KQKD: -"
     assert "DESK:" not in out  # stock calls are not logged on the crypto desk
@@ -353,7 +354,8 @@ def test_order_status_fills_a_buy_limit_then_reports_the_target():
     k5m.append(_k(T0 + timedelta(minutes=90), 350, 348.0))  # 05:00 UTC = 12:00 ICT: filled
     k1h = [_k(T0 + timedelta(minutes=90), 352, 348), _k(T0 + timedelta(minutes=330), 381, 360)]  # 09:00 UTC: 381
     status = h.order_status(LIMIT_LONG, k5m, k1h, mark=370, now=T0 + timedelta(hours=8))
-    assert status == "KHỚP 12/11 12:00 ICT · chạm TP 12/11 16:00 ICT (+1.73R)"
+    # the 381 bar passes +1R (366.7) on its way to the target: half at +1R, half at +1.73R
+    assert status == "KHỚP 12/11 12:00 ICT · chốt 1/2 ở +1R 12/11 16:00 ICT · chạm TP 12/11 16:00 ICT (+1.37R)"
 
 
 @pytest.mark.parametrize("hours_later, want", [(2, "CHỜ · còn 22h"), (25, "HẾT HẠN · không khớp")])
@@ -372,7 +374,35 @@ def test_order_status_counts_the_stop_when_one_bar_spans_stop_and_target():
 def test_order_status_marks_a_filled_order_still_running_in_r():
     k5m = [_k(T0, 350, 348.0)]
     status = h.order_status(LIMIT_LONG, k5m, [_k(T0, 352, 348)], mark=366.7, now=T0 + timedelta(hours=5))
-    assert status == "KHỚP 12/11 10:30 ICT · đang chạy +1.00R (mark 366.7)"
+    assert status == "KHỚP 12/11 10:30 ICT · đang chạy +1.00R (mark 366.7) · chốt 1/2 ở 366.7"
+
+
+# --- 30/10-20/11: 3 of 9 fills reached +1R, two of them then went back to the stop, and no target was ever hit ---
+
+@pytest.mark.parametrize("bars, exit_at", [
+    ([(1, 367, 355), (2, 360, 348)], "12/11 12:30"),  # +1R at 11:30, back to entry an hour later
+    ([(1, 367, 348)], "12/11 11:30"),  # one bar spans +1R and entry: count the worse, the exit at entry
+])
+def test_order_status_moves_the_stop_to_entry_once_half_is_taken(bars, exit_at):
+    k1h = [_k(T0, 352, 348)] + [_k(T0 + timedelta(hours=i), hi, lo) for i, hi, lo in bars]
+    status = h.order_status(LIMIT_LONG, [_k(T0, 350, 348.0)], k1h, mark=350, now=T0 + timedelta(hours=5))
+    assert status == f"KHỚP 12/11 10:30 ICT · chốt 1/2 ở +1R 12/11 11:30 ICT · về hòa vốn {exit_at} ICT (+0.50R)"
+
+
+def test_order_status_shows_the_rest_running_with_its_stop_at_entry():
+    k1h = [_k(T0, 352, 348), _k(T0 + timedelta(hours=1), 367, 355)]
+    status = h.order_status(LIMIT_LONG, [_k(T0, 350, 348.0)], k1h, mark=360, now=T0 + timedelta(hours=5))
+    assert status == ("KHỚP 12/11 10:30 ICT · chốt 1/2 ở +1R 12/11 11:30 ICT, stop dời về 348.5"
+                      " · đang chạy +0.82R (mark 360)")
+
+
+@pytest.mark.parametrize("horizon, end", [(None, "02/12 10:30"), (3, "15/11 10:30")])
+def test_order_status_closes_the_order_when_its_holding_window_ends(horizon, end):
+    # Bars drift 349-352 (closing 350.5) and never reach the stop, +1R or the target.
+    order = LIMIT_LONG if horizon is None else {**LIMIT_LONG, "horizon_days": horizon}
+    k1h = [_k(T0 + timedelta(hours=i), 352, 349) for i in range(24 * 25)]
+    status = h.order_status(order, [_k(T0, 350, 348.0)], k1h, mark=360, now=T0 + timedelta(days=21))
+    assert status == f"KHỚP 12/11 10:30 ICT · hết {horizon or 20} ngày {end} ICT, đóng 350.5 (+0.11R)"
 
 
 def test_plan_log_saves_a_passing_order_once(monkeypatch, capsys, tmp_path):
@@ -721,3 +751,40 @@ def test_scan_says_which_side_each_trend_lets_through(monkeypatch, capsys, tmp_p
     trend = [x for x in capsys.readouterr().out.splitlines() if x.startswith("Xu hướng")]
     assert len(trend) == 1
     assert trend[0].index("QQQUSDT") < trend[0].index("chỉ SHORT") < trend[0].index("EWYUSDT") < trend[0].index("chỉ LONG")
+
+
+def test_plan_log_keeps_the_holding_window_and_the_market(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    monkeypatch.setattr(h, "ORDERS", tmp_path / "orders.json", raising=False)
+    _plan(monkeypatch, capsys, *LONG_99, "--horizon-days", "5", "--log")
+    saved = json.loads((tmp_path / "orders.json").read_text())[0]
+    assert (saved["horizon_days"], saved["market"]) == (5, "US")
+
+
+def test_summarize_scores_fills_and_r_by_side_grade_and_market():
+    def o(side: str, grade: str = "B", market: str = "US") -> dict:
+        return {"side": side, "grade": grade, "market": market, "order": "limit"}
+
+    graded = [(o("LONG"), "closed", -1.0), (o("LONG", market="CN"), "closed", -1.0),
+              (o("SHORT", grade="A"), "closed", 1.37), (o("SHORT"), "running", 0.5),
+              (o("LONG"), "expired", None), (o("SHORT"), "pending", None), (o("LONG"), "canceled", None)]
+    text = "\n".join(h.summarize(graded))
+    assert "khớp 4/5" in text  # 4 filled of the 5 whose 24 hours ran out; pending and canceled don't count
+    assert "Đã đóng 3: thắng 1, thua 2, tổng -0.63R" in text
+    assert "Đang chạy 1: +0.50R" in text
+    assert "LONG 2 lệnh -2.00R" in text and "SHORT 1 lệnh +1.37R" in text
+    assert "A 1 lệnh +1.37R" in text and "CN 1 lệnh -1.00R" in text
+
+
+def test_orders_stats_grades_the_whole_ledger(monkeypatch, capsys, tmp_path):
+    # A 99 buy limit fills on the first 98-102 candle, never reaches 94.8, +1R or 110, and closes at 100 on day 20.
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    path = tmp_path / "orders.json"
+    path.write_text(json.dumps([{"id": 1, "symbol": "TESTUSDT", "side": "LONG", "order": "limit", "entry": 99.0,
+                                 "stop": 94.8, "target": 110.0, "grade": "B", "market": "US",
+                                 "created_at": MONDAY.isoformat(),
+                                 "expires_at": (MONDAY + timedelta(hours=24)).isoformat()}]))
+    monkeypatch.setattr(h, "ORDERS", path, raising=False)
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "orders", "--stats"])
+    h.main()
+    assert "Đã đóng 1: thắng 1, thua 0, tổng +0.24R" in capsys.readouterr().out

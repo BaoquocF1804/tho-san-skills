@@ -28,8 +28,9 @@ Commands:
       entry sits over 1 ATR from mark); --log saves the order, refused while 3 orders are open
   python3 hunt_stock_data.py stops LONG|SHORT SYMBOL [--span 0.07] [--step 0.005] [--leverage 5]
       walks entries away from the mark and prints the tightest stop plan would pass, with 1.5R/2R targets
-  python3 hunt_stock_data.py orders [--days 20] [--cancel ID]
-      logged orders with fill status from Binance bars (waiting / expired / filled, then stop, target or open R)
+  python3 hunt_stock_data.py orders [--days 30] [--cancel ID] [--stats]
+      logged orders with fill status from Binance bars (waiting / expired / filled, then stop, half at +1R with
+      the rest stopped at entry, target, end of the holding window, or open R); --stats scores the whole ledger
 
 Read-only public endpoints (Binance fapi + TradingView Scanner + SEC EDGAR + Google News and Yahoo Finance RSS);
 nothing here can trade.
@@ -754,16 +755,17 @@ def save_orders(orders: list[dict]) -> None:
 
 MAX_OPEN_ORDERS = 3  # SKILL "tối đa 3 lệnh": orders waiting to fill plus filled ones still running
 MAX_SAME_SIDE = 2  # 16/11 three stock LONGs were open at once, and all three hit their stops
+HORIZON_DAYS = 20  # plan's default holding window; orders logged before 21/11 carry no horizon_days
 
 
 def is_open(o: dict, now: datetime) -> bool:
-    """Waiting to fill, or filled and not yet at its stop or target, judged from Binance bars."""
+    """Waiting to fill, or filled and inside its holding window short of a stop or target, from Binance bars."""
     created = datetime.fromisoformat(o["created_at"])
-    if o.get("canceled_at") or created < now - timedelta(days=20):
+    if o.get("canceled_at") or created < now - timedelta(days=o.get("horizon_days", HORIZON_DAYS)):
         return False
-    status = order_status(o, _klines_since(o["symbol"], "5m", created, 300),
-                          _klines_since(o["symbol"], "1h", created, 1000), o["entry"], now)
-    return status.startswith("CHỜ") or "đang chạy" in status
+    state, _, _ = order_result(o, _klines_since(o["symbol"], "5m", created, 300),
+                               _klines_since(o["symbol"], "1h", created, 1000), o["entry"], now)
+    return state in ("pending", "running")
 
 
 def log_order(o: dict) -> str:
@@ -812,32 +814,94 @@ def fill_time(o: dict, k5m: list) -> datetime | None:
     return None
 
 
-def order_status(o: dict, k5m: list, k1h: list, mark: float, now: datetime) -> str:
-    """Where a logged order stands. Bars carry no tick order, so a bar touching both counts the stop, and the
-    bar holding the fill can't count a target it may have traded before the fill."""
+def order_result(o: dict, k5m: list, k1h: list, mark: float, now: datetime) -> tuple[str, str, float | None]:
+    """(state, status line, R of the whole position) of a logged order. State is canceled, pending, expired,
+    running or closed; R is open R while running. Half comes off at +1R and the rest then stops at entry;
+    whatever is left closes at the last close inside the holding window. Bars carry no tick order, so a bar
+    touching two levels counts the worse one, and the bar holding the fill counts only the stop."""
     if o.get("canceled_at"):
-        return f"ĐÃ HỦY {ict(datetime.fromisoformat(o['canceled_at']))}"
+        return "canceled", f"ĐÃ HỦY {ict(datetime.fromisoformat(o['canceled_at']))}", None
     filled = fill_time(o, k5m)
     if filled is None:
         expires = datetime.fromisoformat(o["expires_at"])
-        return ("HẾT HẠN · không khớp" if now >= expires
-                else f"CHỜ · còn {int((expires - now).total_seconds() // 3600)}h")
-    sign = 1 if o["side"] == "LONG" else -1
-    risk = (o["entry"] - o["stop"]) * sign
-    head = f"KHỚP {ict(filled)}"
+        if now >= expires:
+            return "expired", "HẾT HẠN · không khớp", None
+        return "pending", f"CHỜ · còn {int((expires - now).total_seconds() // 3600)}h", None
+    entry = o["entry"]
+
+    def r_of(price: float) -> float:  # the side's sign cancels out: a SHORT's stop sits above entry
+        return (price - entry) / (entry - o["stop"])
+
+    tp_r, days = r_of(o["target"]), o.get("horizon_days", HORIZON_DAYS)
+    end = datetime.fromisoformat(o["created_at"]) + timedelta(days=days)
+    head, half, last = f"KHỚP {ict(filled)}", None, None
     # Binance starts 1h bars at the first full hour after startTime, so 5m bars cover the rest of that hour
     first_hour = _bar_time(k1h[0]) if k1h else now
     bars = ([(k, timedelta(minutes=5)) for k in k5m if _bar_time(k) < first_hour]
             + [(k, timedelta(hours=1)) for k in k1h])
     for k, span in bars:
-        t, high, low = _bar_time(k), float(k[2]), float(k[3])
+        t = _bar_time(k)
         if t + span <= filled:
             continue
-        if (low <= o["stop"]) if sign > 0 else (high >= o["stop"]):
-            return f"{head} · chạm stop {ict(t)} (-1.00R)"
-        if not t <= filled < t + span and ((high >= o["target"]) if sign > 0 else (low <= o["target"])):
-            return f"{head} · chạm TP {ict(t)} ({(o['target'] - o['entry']) * sign / risk:+.2f}R)"
-    return f"{head} · đang chạy {(mark - o['entry']) * sign / risk:+.2f}R (mark {mark:.6g})"
+        if t + span > end:
+            break
+        last = float(k[4])
+        worst, best = sorted((r_of(float(k[2])), r_of(float(k[3]))))
+        if half is None:
+            if worst <= -1:
+                return "closed", f"{head} · chạm stop {ict(t)} (-1.00R)", -1.0
+            if t <= filled or best < min(1, tp_r):
+                continue
+            if tp_r <= 1:  # a target inside +1R takes the whole position
+                return "closed", f"{head} · chạm TP {ict(t)} ({tp_r:+.2f}R)", tp_r
+            half = t
+        if worst <= 0:
+            return "closed", f"{head} · chốt 1/2 ở +1R {ict(half)} · về hòa vốn {ict(t)} (+0.50R)", 0.5
+        if best >= tp_r:
+            r = 0.5 + tp_r / 2
+            return "closed", f"{head} · chốt 1/2 ở +1R {ict(half)} · chạm TP {ict(t)} ({r:+.2f}R)", r
+    taken = f"{head} · chốt 1/2 ở +1R {ict(half)}" if half else head
+    if now >= end:  # the holding window ran out with the position still open
+        price = mark if last is None else last
+        r = r_of(price) if half is None else 0.5 + r_of(price) / 2
+        return "closed", f"{taken} · hết {days} ngày {ict(end)}, đóng {price:.6g} ({r:+.2f}R)", r
+    if half:
+        r = 0.5 + r_of(mark) / 2
+        return "running", f"{taken}, stop dời về {entry:g} · đang chạy {r:+.2f}R (mark {mark:.6g})", r
+    nudge = f" · chốt 1/2 ở {2 * entry - o['stop']:.6g}" if tp_r > 1 else ""
+    return "running", f"{head} · đang chạy {r_of(mark):+.2f}R (mark {mark:.6g}){nudge}", r_of(mark)
+
+
+def order_status(o: dict, k5m: list, k1h: list, mark: float, now: datetime) -> str:
+    """Where a logged order stands, as the line `orders` prints."""
+    return order_result(o, k5m, k1h, mark, now)[1]
+
+
+def summarize(graded: list[tuple[dict, str, float | None]]) -> list[str]:
+    """Scorecard lines from (order, state, R): how often pending orders filled, closed and open R, and closed R
+    by side, grade and market."""
+    done = [(o, r) for o, s, r in graded if s == "closed"]
+    running = [r for _, s, r in graded if s == "running"]
+    ran_out = [(o, s) for o, s, _ in graded if s in ("expired", "running", "closed") and o["order"] != "market"]
+
+    def fills(side: str | None = None) -> tuple[int, int]:
+        rows = [s for o, s in ran_out if side in (None, o["side"])]
+        return sum(s != "expired" for s in rows), len(rows)
+
+    (f, n), total = fills(), sum(r for _, r in done)
+    lines = [f"Lệnh chờ hết 24 giờ: khớp {f}/{n}" + (f" ({f / n:.0%})" if n else "")
+             + " · LONG {}/{} · SHORT {}/{}".format(*fills("LONG"), *fills("SHORT")),
+             f"Đã đóng {len(done)}: thắng {sum(r > 0 for _, r in done)}, thua {sum(r < 0 for _, r in done)},"
+             f" tổng {total:+.2f}R" + (f" ({total / len(done):+.2f}R/lệnh)" if done else ""),
+             f"Đang chạy {len(running)}: {sum(running):+.2f}R trên giấy"]
+    for title, key in (("Theo chiều", "side"), ("Theo hạng", "grade"), ("Theo thị trường", "market")):
+        groups: dict[str, list[float]] = {}
+        for o, r in done:
+            groups.setdefault(o.get(key) or "?", []).append(r)
+        if groups:
+            lines.append(f"{title}: " + " · ".join(f"{g} {len(rs)} lệnh {sum(rs):+.2f}R"
+                                                 for g, rs in sorted(groups.items())))
+    return lines
 
 
 def equity_symbol_meta(info) -> dict[str, dict]:
@@ -1416,7 +1480,8 @@ def plan(args) -> None:
               f" ({fnd['company_name']}) — {kind}{' (tối đa hạng B)' if caps else ''}")
         print(f"TG: • Vào: {entry:.10g} | Stop: {args.stop:.10g} ({(args.stop / entry - 1) * 100:+.2f}%,"
               f" {risk_unit / a:.2f} ATR) | TP: {args.target:.10g} ({(args.target / entry - 1) * 100:+.2f}%)"
-              f" | R:R: {reward_unit / risk_unit:.2f}")
+              f" | R:R: {reward_unit / risk_unit:.2f}"
+              + (f" | Chốt 1/2: {entry + sign * risk_unit:.10g}" if reward_unit > risk_unit else ""))
         print(f"TG: • Size: {contracts.normalize():f} hợp đồng {meta['okx']} ({qty.normalize():f} {base}"
               f" ≈ {notional:.2f} USDT) | Ký quỹ: {notional / args.leverage:.2f} (x{args.leverage})"
               f" | Rủi ro: {float(qty) * risk_unit:.2f} | Thanh lý: ~{liq:.6g}")
@@ -1426,7 +1491,8 @@ def plan(args) -> None:
             print(log_order({
                 "symbol": sym, "side": side, "entry": entry, "stop": args.stop, "target": args.target,
                 "order": {"vào ngay": "market", "lệnh chờ (limit)": "limit", "lệnh chờ (stop)": "stop"}[order],
-                "qty": float(qty), "risk": round(float(qty) * risk_unit, 2), "grade": "B" if caps else "A"}))
+                "qty": float(qty), "risk": round(float(qty) * risk_unit, 2), "grade": "B" if caps else "A",
+                "market": fnd["market"], "horizon_days": args.horizon_days}))
 
 
 def stops(args) -> None:
@@ -1466,8 +1532,26 @@ def _klines_since(sym: str, interval: str, since: datetime, limit: int) -> list:
 
 
 def orders(args) -> None:
-    """Logged orders of the last --days with fill status, or cancel one that has not filled."""
+    """Logged orders of the last --days with fill status, the scorecard of the whole ledger (--stats), or cancel
+    one that has not filled."""
     rows, now = load_orders(), datetime.now(timezone.utc)
+    if args.stats:
+        marks: dict[str, float] = {}
+        graded = []
+        for o in rows:
+            created = datetime.fromisoformat(o["created_at"])
+            if o.get("canceled_at"):
+                graded.append((o, "canceled", None))
+                continue
+            if o["symbol"] not in marks:
+                marks[o["symbol"]] = float(get_binance("/fapi/v1/premiumIndex", symbol=o["symbol"])["markPrice"])
+            state, _, r = order_result(o, _klines_since(o["symbol"], "5m", created, 300),
+                                       _klines_since(o["symbol"], "1h", created, 1000), marks[o["symbol"]], now)
+            graded.append((o, state, r))
+        first = min((datetime.fromisoformat(o["created_at"]) for o in rows), default=now)
+        print(f"Thống kê {len(rows)} lệnh từ {ict(first)} ({ORDERS}), chấm theo nến Binance, chốt 1/2 ở +1R:")
+        print("\n".join(f"- {line}" for line in summarize(graded)))
+        return
     if args.cancel is not None:
         o = next((x for x in rows if x["id"] == args.cancel), None)
         if o is None:
@@ -1523,7 +1607,7 @@ def main() -> None:
     p.add_argument("--margin-cap", type=float, default=0.20)
     p.add_argument("--min-rr", type=float, default=1.5)
     p.add_argument("--entry-band", type=float, default=0.005)
-    p.add_argument("--horizon-days", type=int, default=20)
+    p.add_argument("--horizon-days", type=int, default=HORIZON_DAYS)
     p.add_argument("--earnings-date", metavar="YYYY-MM-DD", help="next earnings date confirmed by news")
     p.add_argument("--log", action="store_true",
                    help="save a PASS order to the ledger `orders` reads (refused past 3 open orders)")
@@ -1534,8 +1618,9 @@ def main() -> None:
     p.add_argument("--step", type=float, default=0.005)
     p.add_argument("--leverage", type=int, default=5)
     p = sub.add_parser("orders")
-    p.add_argument("--days", type=int, default=20)
+    p.add_argument("--days", type=int, default=30, help="list orders created this recently (holding window + 10)")
     p.add_argument("--cancel", type=int, metavar="ID")
+    p.add_argument("--stats", action="store_true", help="scorecard of every logged order")
     args = parser.parse_args()
     {"scan": scan, "detail": detail, "news": news, "plan": plan, "stops": stops, "orders": orders}[args.cmd](args)
 
