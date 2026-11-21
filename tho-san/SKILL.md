@@ -21,11 +21,14 @@ Người dùng đặt lệnh trên **OKX**. Dữ liệu phân tích vẫn lấy 
 | Stop | ≥ 1 ATR14 ngày, ≤ `(1/đòn bẩy − mmr)/2` (8,75% ở x5) và cách mọi đỉnh/đáy ngày ≥ 0,25 ATR (`plan` tự kiểm: sát swing 120 ngày hoặc đỉnh/đáy 2 ngày gần nhất thì `FAIL`; sát đỉnh/đáy bất kỳ trong 20 ngày thì `WARN` và hạ trần hạng) |
 | R:R gộp | ≥ 1,5 (script kèm thêm `net R:R` sau phí taker 2 chiều 0,10%) |
 | Vào ngay | entry trong ±0,5% giá mark; xa hơn là lệnh chờ (`limit` nếu chờ hồi, `stop` nếu đánh phá vỡ) |
-| Tầm nhìn | ≤ 20 ngày, tối đa 3 lệnh |
-| Hạng | `plan` in `Hạng tối đa`. Là B khi stop dính `WARN`, khi lệnh chờ có 24 giờ hiệu lực trùm một sự kiện vĩ mô Mỹ (CPI, PPI, việc làm, FOMC; lịch nằm ở `macro_events.json`, gốc repo skills), hoặc khi entry chờ cách mark hơn 1 ATR. Báo cáo được hạ hạng, **không được nâng** |
+| Xu hướng thị trường | `plan` FAIL lệnh LONG khi BTC đóng cửa ngày gần nhất dưới EMA20, FAIL lệnh SHORT khi trên EMA20; dòng `Xu hướng` của `scan` cho biết chiều nào được dựng. Lý do: 25/10–21/11 cả 2 lệnh LONG đã chấm đều thua, TRX còn đang −0,82R, trong khi SHORT thắng 9/12 |
+| Lệnh chờ | Hiệu lực **72 giờ** trên desk (`hunter.tho_san_ttl_hours`). Lý do: 25/10–21/11 chỉ 11/39 lệnh chờ khớp trong 24 giờ, tới 72 giờ thì khớp 24/39, phần lớn chạm TP |
+| Tầm nhìn | ≤ 20 ngày; tối đa 3 lệnh đang mở (chờ khớp cộng đã khớp chưa chấm xong; desk từ chối lệnh thứ 4) |
+| Hạng | `plan` in `Hạng tối đa`. Là B khi stop dính `WARN`, khi lệnh chờ có 72 giờ hiệu lực trùm một sự kiện vĩ mô Mỹ (CPI, PPI, việc làm, FOMC; lịch nằm ở `macro_events.json`, gốc repo skills), hoặc khi entry chờ cách mark hơn 1 ATR. Báo cáo được hạ hạng, **không được nâng** |
 
 ## Quy trình
 1. **Dữ liệu:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py scan` (khoảng 15 giây, 40 hợp đồng lớn nhất). Săn mã cờ `OK` (x5) và `OKxN` (dùng `--leverage N`). Bỏ `ATR` (quá biến động kể cả ở x2, hoặc mã mới chưa đủ 15 nến ngày) và `PUMP` (vừa pump hoặc funding cực đoan).
+   - Dòng `Xu hướng` (ngay sau dòng tóm tắt): BTC đóng cửa ngày so với EMA20. `chỉ SHORT` nghĩa là `plan` FAIL mọi lệnh LONG, `chỉ LONG` thì ngược lại; chỉ dựng setup theo chiều được phép.
    - Bảng chỉ còn mã đặt được trên OKX: cùng tên, cùng loại coin, giá OKX lệch Binance ≤ 1%, volume OKX 24h ≥ 2 triệu USD (`--okx-min-qv`). Bị loại: mã chỉ có trên Binance (DODOX, KAVA, XMR…), hợp đồng 1000x của Binance (1000PEPE, 1000SHIB, 1000BONK…), và mã trùng tên một cổ phiếu trên OKX (BB, ON, QNT).
 2. **Tin tức. REQUIRED SUB-SKILL:** agent-reach.
    - Đọc [references/nguon-tin.md](references/nguon-tin.md) trước: các trang đọc được khi Exa bị chặn (bản đồ thanh lý, ETF, lịch sự kiện) và các bẫy số liệu đã gặp.
@@ -39,7 +42,7 @@ Người dùng đặt lệnh trên **OKX**. Dữ liệu phân tích vẫn lấy 
 3. **Soi kỹ 3–6 mã:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py detail SYM1 SYM2 ...` (mức hỗ trợ/kháng cự đã gom cụm 0,25 ATR và tính cả S/R flip, vị thế nhỏ lẻ và top trader, nến hôm nay, nến 4h).
    - Dòng `OKX <hợp đồng>`: giá OKX so với Binance, volume 24h trên OKX, 1 hợp đồng bằng bao nhiêu coin, đòn bẩy tối đa.
    - Dòng `OKX crowd 100d`: OI, L/S nhỏ lẻ, top trader và taker của riêng OKX trong 100 ngày (`pct100` là phân vị 100 ngày), cùng funding OKX, tức khoản người dùng thực trả. Ngày OKX bắt đầu lúc 16:00 UTC (0h giờ Hồng Kông), nên dòng mới nhất là ngày đang chạy. Dòng vị thế Binance (`pct30`) vẫn là đám đông lớn nhất; dòng OKX cho biết đám đông trên chính sàn đặt lệnh.
-4. **Dựng setup, chiều nào cũng được:** hồi về hỗ trợ trong xu hướng; phá vỡ hoặc thủng mức có OI và taker xác nhận; đảo chiều khi đòn bẩy quá nóng (OI tăng mạnh, funding cao, nhỏ lẻ dồn một phía, top trader phía kia); catalyst có ngày. Stop đặt ở mức luận điểm sai **và** vượt qua cụm thanh lý / đỉnh đáy quét stop gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
+4. **Dựng setup theo chiều dòng `Xu hướng` cho phép:** hồi về hỗ trợ trong xu hướng; phá vỡ hoặc thủng mức có OI và taker xác nhận; đảo chiều khi đòn bẩy quá nóng (OI tăng mạnh, funding cao, nhỏ lẻ dồn một phía, top trader phía kia); catalyst có ngày. Stop đặt ở mức luận điểm sai **và** vượt qua cụm thanh lý / đỉnh đáy quét stop gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
    - Dò stop bằng `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py stops LONG|SHORT SYM [--span 0.07] [--step 0.005]`, đừng viết script dò riêng. Lệnh này in, cho từng entry tính từ mark, mức stop chặt nhất mà `plan` cho qua. Mục tiêu 1,5R/2R đi kèm chỉ để tham chiếu. `WARN near` là đỉnh/đáy 20 ngày gần ngay sát stop.
 5. **Kiểm từng lệnh ngay trước khi báo:** `python3 ~/.gemini/config/skills/tho-san/scripts/hunt_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C]`. `FAIL` thì sửa mức hoặc bỏ lệnh; entry xa mark là lệnh chờ (`limit` hoặc `stop` theo output của script). Lệnh vào ngay khớp quanh mark, nên `plan` tính rủi ro từ giá xấu hơn giữa entry và mark. `PASS` thì `plan` in `Hạng tối đa`, sẵn 3 dòng `TG:` (tiêu đề; Vào/Stop/TP/R:R; Size/Ký quỹ/Rủi ro/Thanh lý) và dòng `DESK:`. Báo cáo dán nguyên văn các dòng `TG:` (bỏ tiền tố `TG: `), kể cả `(tối đa hạng B)` ở dòng đầu; desk chạy đúng dòng `DESK:`. Không gõ lại con số nào.
    - `plan` và `stops` từ chối mã không đặt được trên OKX (`không đặt được trên OKX`): bỏ mã đó.
@@ -55,6 +58,7 @@ Người dùng đặt lệnh trên **OKX**. Dữ liệu phân tích vẫn lấy 
      - `"duplicate": false`: lệnh mới, báo cáo ghi `#id`.
      - `"duplicate": true`: lệnh cũ còn giữ, báo cáo ghi "giữ #id", không tính là lệnh mới.
      - `Error: Đã đủ ... lệnh tho-san trong 24 giờ` hoặc vượt rủi ro 24 giờ: bỏ lệnh khỏi báo cáo, đưa vào **Đã loại** với lý do giới hạn ngày.
+     - `Error: Đã có ... lệnh tho-san đang mở`: đủ 3 lệnh đang mở. Hủy lệnh chờ yếu nhất (`desk cancel-call ID`) rồi chạy lại, hoặc đưa lệnh này vào **Đã loại** với lý do đủ 3 lệnh.
    - Lệnh chờ kiểu `stop` không có dòng `DESK:` vì desk chưa chấm được; báo cáo ghi "chưa ghi desk". Desk không có lệnh này, nên lượt săn sau lấy nó từ mục Lệnh chờ của báo cáo gần nhất trong `~/.local/share/tho-san/` và kiểm khớp bằng nến 5m.
    - Kết quả xem bằng `desk scorecard`, dòng `tho-san`.
 
@@ -75,7 +79,7 @@ Báo cáo là đúng khung dưới đây: các mục này, theo thứ tự này.
 - **Phản biện:** <lý do của `Hạng tối đa: B` nếu có> <...>
 - **Sai nếu:** <mức đóng sớm hoặc hủy>
 
-## Lệnh chờ (hiệu lực 24 giờ)
+## Lệnh chờ (hiệu lực 72 giờ)
 <mỗi lệnh trình bày như trên; lệnh kiểu stop ghi "chưa ghi desk" thay cho #id>
 
 ## Lệnh cũ
@@ -134,4 +138,6 @@ _Phân tích tham khảo, không phải lời khuyên đầu tư._
 | Thay hoặc bỏ lệnh chờ nhưng lệnh cũ vẫn `LOGGED` và vẫn được chấm điểm | `desk cancel-call ID` trước khi ghi lệnh thay |
 | Lọc lệnh cũ theo `expires_at`, coi lệnh limit đã khớp là lệnh chờ rồi hủy hoặc quên nó (#28 HYPE khớp 31/10 mà vẫn `LOGGED`, `outcome` null) | Đọc `filled_at`: có giờ là vị thế đang chạy, không hủy, báo giữ hay đóng sớm |
 | Desk báo đủ lệnh trong 24 giờ, đổi số cho khác để ghi bằng được | Bỏ lệnh yếu nhất, hoặc hủy lệnh bị thay rồi ghi lại |
+| Đẩy giá chờ ra xa mark cho đủ R:R 1,5 rồi tưởng lệnh sẽ khớp (25/10–21/11: lệnh chờ cách mark trung vị 0,65 ATR, trong khi 24 giờ giá chỉ hồi trung vị 0,29 ATR; 25/28 lệnh không khớp vẫn chạy về TP) | Lệnh chờ cách mark trên ~0,6 ATR thì ghi vào **Phản biện** là khó khớp; ưu tiên setup có stop và TP cấu trúc cho R:R ≥ 1,5 gần mark |
+| Mua bắt đáy khi BTC dưới EMA20 (2/2 lệnh LONG thua, TRX −0,82R) | Theo dòng `Xu hướng`; `plan` FAIL lệnh ngược xu hướng BTC |
 

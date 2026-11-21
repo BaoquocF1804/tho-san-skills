@@ -12,8 +12,9 @@ Orders go on OKX: every command keeps only contracts OKX lists under the same na
   python3 hunt_data.py plan LONG|SHORT SYMBOL --stop X --target Y [--entry E] [--capital 1000]
       checks the risk rules against a fresh mark and ATR, then sizes the position; on PASS prints the TG: lines
       the report pastes and the DESK: log-call line, so no level is retyped; a WARN (stop within 0.25 ATR of a
-      daily high/low of the last 20 days), a pending order spanning a US macro print (macro_events.json at the
-      skills repo root) or a pending entry over 1 ATR from mark caps `Hạng tối đa` at B
+      daily high/low of the last 20 days), a pending order whose 72h life spans a US macro print
+      (macro_events.json at the skills repo root) or a pending entry over 1 ATR from mark caps `Hạng tối đa` at B;
+      a LONG fails while BTC's last daily close sits under its EMA20, a SHORT while it sits over
   python3 hunt_data.py stops LONG|SHORT SYMBOL [--span 0.07] [--step 0.005] [--leverage 5]
       walks entries away from the mark and prints the tightest stop plan would pass, with 1.5R/2R targets
 
@@ -55,6 +56,8 @@ PUMP_FUNDING = 0.005  # per interval, near the exchange cap: one side is paying 
 TAKER_FEE_ROUNDTRIP = 0.001  # 0.05% entry + 0.05% exit on Binance USDⓈ-M
 STOP_CLEARANCE_ATR = 0.25  # a stop nearer than this to a daily high/low goes with the wick that sweeps it
 STOP_ROOM = 1.25  # a leverage's stop cap must clear 1 ATR by a quarter ATR, or the level bands swallow the window
+PENDING_HOURS = 72  # the desk's hunter.tho_san_ttl_hours: how long a logged limit waits to fill
+TREND_EMA = 20  # a LONG needs BTC's last daily close at or over its EMA20, a SHORT at or under (as the stock hunter)
 
 
 def get(path: str, **params):
@@ -147,6 +150,12 @@ def stop_levels(k1d: list) -> tuple[float | None, list[float], list[float]]:
 
 def within(levels: list[float], price: float, band: float) -> list[float]:
     return [x for x in levels if abs(x - price) < band]
+
+
+def market_trend() -> tuple[float, float]:
+    """BTC's last closed daily close and the EMA20 of those closes: which side a crypto plan may take."""
+    closes = [float(k[4]) for k in get("/fapi/v1/klines", symbol="BTCUSDT", interval="1d", limit=120)[:-1]]
+    return closes[-1], ema(closes, TREND_EMA)
 
 
 def load_macro_events() -> list[tuple[datetime, str]]:
@@ -301,6 +310,10 @@ def scan(args) -> None:
           f" >= ${args.okx_min_qv / 1e6:g}M): OK = room for a stop at x{args.leverage}, OKxN = ATR too wide for"
           f" x{args.leverage}, run stops/plan with --leverage N (risk stays 1%), ATR = too volatile even at x2,"
           f" PUMP = today's move/funding not in the ATR. Saved {OUT}")
+    c, e = market_trend()
+    rel, allowed = (">", "chỉ LONG") if c > e else ("<", "chỉ SHORT") if c < e else ("=", "cả hai chiều")
+    print(f"Xu hướng (nến ngày đã đóng; plan FAIL chiều ngược): BTCUSDT {c:.6g} {rel} EMA{TREND_EMA} {e:.6g}"
+          f" → {allowed}")
     print(f"{'sym':<14}{'flag':>5}{'mark':>11}{'24h':>6}{'7d':>7}{'20d':>7}{'rsBTC':>7}{'>e20':>5}"
           f"{'e20>50':>7}{'>e200':>6}{'rsi1d':>6}{'rsi4h':>6}{'atr%':>6}{'resATR':>7}{'supATR':>7}"
           f"{'oi7d':>7}{'ls%':>5}{'top%':>5}{'tkr3d':>6}{'fund%':>9}")
@@ -376,6 +389,7 @@ def plan(args) -> None:
     a, veto, watch = stop_levels(k1d)  # closed days: same ATR as scan/detail
     if a is None:
         raise SystemExit(f"{sym}: fewer than 15 closed daily candles, so no ATR14 yet — skip this contract")
+    b_close, b_ema = market_trend()
     entry, note = args.entry or mark, ""
     sign = 1 if side == "LONG" else -1
     if abs(entry / mark - 1) <= args.entry_band:
@@ -399,6 +413,8 @@ def plan(args) -> None:
     near = within(veto, args.stop, band)
     hug = [x for x in within(watch, args.stop, band) if x not in near]
     checks = {
+        f"market trend allows {side} (BTCUSDT close {b_close:.6g} {'>=' if sign > 0 else '<='}"
+        f" EMA{TREND_EMA} {b_ema:.6g})": (b_close - b_ema) * sign >= 0,
         "stop >= 1 ATR": risk_unit >= a,
         f"stop <= {limit * 100:.2f}% (x{args.leverage} liquidation buffer)": risk_unit / entry <= limit,
         f"gross R:R >= {args.min_rr}": reward_unit / risk_unit >= args.min_rr,
@@ -439,14 +455,15 @@ def plan(args) -> None:
         pending = order != "vào ngay"
         now = datetime.now(timezone.utc)
         events = load_macro_events()
-        soon = [f"{name} {ict(t)}" for t, name in events if now <= t <= now + timedelta(hours=24)]
+        hours = PENDING_HOURS if pending else 24  # a logged limit waits PENDING_HOURS on the desk
+        soon = [f"{name} {ict(t)}" for t, name in events if now <= t <= now + timedelta(hours=hours)]
         # Facts the report must not talk past: it may grade lower than this, never higher.
         caps = ([f"stop sát đỉnh/đáy ngày gần ({', '.join(f'{x:.6g}' for x in hug)})"] if hug else []) + (
-            [f"lệnh chờ 24h trùm {', '.join(soon)}"] if pending and soon else []) + (
+            [f"lệnh chờ {PENDING_HOURS}h trùm {', '.join(soon)}"] if pending and soon else []) + (
             [f"entry cách mark {abs(entry - mark) / a:.2f} ATR, chỉ khớp khi giá chạy mạnh"]
             if pending and abs(entry - mark) > a else [])
         if soon:
-            print("Sự kiện vĩ mô 24h tới: " + ", ".join(soon))
+            print(f"Sự kiện vĩ mô {hours}h tới: " + ", ".join(soon))
         if not events:
             print(f"⚠️ Không đọc được {MACRO_EVENTS.name}: tự kiểm CPI/PPI/việc làm/FOMC trong 24h tới")
         elif events[-1][0] < now + timedelta(days=30):

@@ -109,8 +109,8 @@ def _fake_exchange(monkeypatch, tmp_path, closed_by_symbol: dict[str, int]) -> N
             rows = [{"symbol": s, "quoteVolume": "90000000", "priceChangePercent": "3",
                      "markPrice": "100", "lastFundingRate": "0.0001"} for s in closed_by_symbol]
             return rows if sym is None else next(r for r in rows if r["symbol"] == sym)
-        if path == "/fapi/v1/klines":  # served for 1d and 4h alike
-            return _bars(closed_by_symbol[sym])[-params["limit"]:]
+        if path == "/fapi/v1/klines":  # served for 1d and 4h alike; BTCUSDT, the trend yardstick, has 60 flat days
+            return _bars(closed_by_symbol.get(sym, 60))[-params["limit"]:]
         return [HISTORY[path]] * min(closed_by_symbol[sym], params["limit"])
 
     monkeypatch.setattr(hd, "get", get)
@@ -439,3 +439,57 @@ def test_okx_error_answer_is_not_read_as_an_empty_market(monkeypatch):
     monkeypatch.setattr(hd.okx_gate.urllib.request, "urlopen", lambda request, timeout: io.BytesIO(body))
     with pytest.raises(RuntimeError, match="51001"):
         hd.okx_gate.get("/api/v5/public/funding-rate", instId="NOPE-USDT-SWAP")
+
+
+# --- 21/11: both LONG calls lost and TRX ran at -0.82R while BTC closed under its EMA20 ---
+
+FALLING = [200.0 - i for i in range(60)]
+RISING = [100.0 + i for i in range(60)]
+
+
+def _btc_trend(monkeypatch, closes: list[float]) -> None:
+    """BTCUSDT's daily closes, day by day; every other symbol keeps the candles already faked."""
+    base_get = hd.get
+
+    def get(path: str, **params):
+        if path != "/fapi/v1/klines" or params.get("symbol") != "BTCUSDT":
+            return base_get(path, **params)
+        days = [START + timedelta(days=i) for i in range(len(closes) + 1)]  # the extra day is the forming candle
+        return [[int(d.timestamp() * 1000), str(c), str(c), str(c), str(c), "1000", 0, "100000", 10, "500",
+                 "50000", "0"] for d, c in zip(days, closes + closes[-1:])][-params["limit"]:]
+
+    monkeypatch.setattr(hd, "get", get)
+
+
+@pytest.mark.parametrize("side, levels, btc, want", [
+    ("LONG", ("--stop", "85", "--target", "140"), FALLING, "FAIL"),
+    ("LONG", ("--stop", "85", "--target", "140"), RISING, "PASS"),
+    ("SHORT", ("--stop", "114", "--target", "75"), RISING, "FAIL"),
+    ("SHORT", ("--stop", "114", "--target", "75"), FALLING, "PASS"),
+])
+def test_plan_only_lets_the_side_of_the_btc_trend_through(monkeypatch, capsys, tmp_path, side, levels, btc, want):
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    _btc_trend(monkeypatch, btc)
+    out = _run(monkeypatch, capsys, "plan", side, "COINUSDT", *levels, "--leverage", "2")
+    trend = [line.split()[0] for line in out.splitlines() if "market trend" in line]
+    assert trend == [want]
+    assert f"VERDICT: {want}" in out
+
+
+def test_plan_caps_at_b_a_pending_order_whose_72h_life_spans_a_macro_print(monkeypatch, capsys, tmp_path):
+    # The desk keeps a tho-san limit 72h now, so a print two days out falls inside its life.
+    _fake_exchange(monkeypatch, tmp_path, {"COINUSDT": 60})
+    later = datetime.now(timezone.utc) + timedelta(hours=50)
+    monkeypatch.setattr(hd, "load_macro_events", lambda: [(later, "CPI")], raising=False)
+    out = _run(monkeypatch, capsys, "plan", "SHORT", "COINUSDT", "--entry", "102", "--stop", "114",
+               "--target", "75", "--leverage", "2")
+    grade = _line(out, "Hạng tối đa:")
+    assert grade.startswith("Hạng tối đa: B") and "CPI" in grade
+
+
+def test_scan_says_which_side_btc_lets_through(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, tmp_path, {"BTCUSDT": 60, "COINUSDT": 60})
+    _btc_trend(monkeypatch, FALLING)
+    out = _run(monkeypatch, capsys, "scan")
+    trend = [line for line in out.splitlines() if line.startswith("Xu hướng")]
+    assert len(trend) == 1 and "BTCUSDT" in trend[0] and "chỉ SHORT" in trend[0]
