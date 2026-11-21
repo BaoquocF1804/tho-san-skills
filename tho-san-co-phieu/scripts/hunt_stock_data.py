@@ -156,6 +156,10 @@ MAX_MARK_INDEX_DEV = 0.005  # 0.5% max deviation between markPrice and indexPric
 TAKER_FEE_ROUNDTRIP = 0.001
 STOP_CLEARANCE_ATR = 0.25  # a stop nearer than this to a daily high/low goes with the wick that sweeps it
 STOP_ROOM = 1.25  # a leverage's stop cap must clear 1 ATR by a quarter ATR, or the level bands swallow the window
+TREND_EMA = 20  # 30/10-20/11 QQQ closed under its EMA20 every session, and every LONG that filled hit its stop
+TREND_PROXIES = {"KR": "EWYUSDT"}  # every other market goes by QQQ: in 11/2026 the CN/HK names fell with it
+# ponytail: one proxy per market, so a defensive LONG (KO, XOM) is blocked in a QQQ downtrend too; add sector
+# proxies (XLP, XLE) if that turns out to cost good trades
 
 REV_TAGS = [
     "Revenues",
@@ -710,6 +714,14 @@ def within(levels: list[float], price: float, band: float) -> list[float]:
     return [x for x in levels if abs(x - price) < band]
 
 
+def market_trend(market: str) -> tuple[str, float, float]:
+    """The index perp that decides which side may trade: its last closed weekday close and the EMA20 of those."""
+    proxy = TREND_PROXIES.get(market, "QQQUSDT")
+    k1d = get_binance("/fapi/v1/klines", symbol=proxy, interval="1d", limit=120)
+    closes = [float(k[4]) for k in weekday_bars(k1d[:-1])]
+    return proxy, closes[-1], ema(closes, TREND_EMA)
+
+
 def load_macro_events() -> list[tuple[datetime, str]]:
     """US prints that move every market (CPI, PPI, jobs report, FOMC), from the table shared with tho-san."""
     try:
@@ -741,6 +753,7 @@ def save_orders(orders: list[dict]) -> None:
 
 
 MAX_OPEN_ORDERS = 3  # SKILL "tối đa 3 lệnh": orders waiting to fill plus filled ones still running
+MAX_SAME_SIDE = 2  # 16/11 three stock LONGs were open at once, and all three hit their stops
 
 
 def is_open(o: dict, now: datetime) -> bool:
@@ -754,14 +767,23 @@ def is_open(o: dict, now: datetime) -> bool:
 
 
 def log_order(o: dict) -> str:
-    """Save a PASS order so the next hunt still sees it; the same live call keeps its first id, and a fourth
-    open order is refused, as the crypto desk refuses a fourth call."""
+    """Save a PASS order so the next hunt still sees it; the same live call keeps its first id. Refused: a second
+    open order on the same stock and side, a third on one side, and a fourth in all, as the crypto desk refuses."""
     orders, now = load_orders(), datetime.now(timezone.utc)
     for old in orders:
         if (all(old[k] == o[k] for k in ("symbol", "side", "entry", "stop", "target"))
                 and "canceled_at" not in old and datetime.fromisoformat(old["expires_at"]) > now):
             return f"LOG: trùng #{old['id']} (giữ lệnh cũ, không ghi thêm)"
     live = [x for x in orders if is_open(x, now)]
+    twin = next((x for x in live if (x["symbol"], x["side"]) == (o["symbol"], o["side"])), None)
+    if twin:
+        raise SystemExit(f"LOG: từ chối, đã có #{twin['id']} {o['side']} {o['symbol']} đang mở: giữ lệnh đó, hoặc"
+                         " nếu nó còn chờ khớp thì `orders --cancel ID` rồi chạy lại")
+    same_side = [x for x in live if x["side"] == o["side"]]
+    if len(same_side) >= MAX_SAME_SIDE:
+        ids = ", ".join(f"#{x['id']}" for x in same_side)
+        raise SystemExit(f"LOG: từ chối, sổ đã có {len(same_side)} lệnh {o['side']} mở ({ids}): hủy lệnh chờ yếu"
+                         " nhất cùng chiều bằng `orders --cancel ID` rồi chạy lại, hoặc đưa lệnh này vào Đã loại")
     if len(live) >= MAX_OPEN_ORDERS:
         ids = ", ".join(f"#{x['id']}" for x in live)
         raise SystemExit(f"LOG: từ chối, sổ đã có {len(live)} lệnh mở ({ids}): hủy lệnh chờ yếu nhất bằng"
@@ -1023,6 +1045,12 @@ def scan(args) -> None:
           f" {args.okx_min_qv / 1e6:g}M{f', top {args.top}' if args.top else ''}): OK = tradeable at x{args.leverage},"
           f" OKxN = ATR too wide for x{args.leverage}, run stops/plan with --leverage N (risk stays 1%),"
           f" ATR = too volatile even at x2, PUMP = extreme move/funding, INDEX = mark/index >0.5%. Saved {OUT}")
+    sides = []
+    for market, who in (("US", "mọi mã trừ KR"), ("KR", "mã KR")):
+        proxy, c, e = market_trend(market)
+        rel, side = (">", "chỉ LONG") if c > e else ("<", "chỉ SHORT") if c < e else ("=", "cả hai chiều")
+        sides.append(f"{proxy} {c:.6g} {rel} EMA{TREND_EMA} {e:.6g} → {side} ({who})")
+    print("Xu hướng (nến ngày đã đóng; plan FAIL chiều ngược): " + " | ".join(sides))
     print(f"{'sym':<14}{'mkt':<4}{'sector':<13}{'flag':>5}{'mark':>9}{'24h':>6}{'7d':>6}{'20d':>6}{'rsSPY':>6}"
           f"{'>e20':>5}{'e20>50':>7}{'rsi1d':>6}{'rsi4h':>6}{'atr%':>5}{'resA':>5}{'supA':>5}"
           f"{'oi7d':>7}{'ls%':>4}{'top%':>5}{'fund%':>8}{'revYoY':>8}{'niYoY':>8}{'pe':>6}{'earn':>6}")
@@ -1282,6 +1310,7 @@ def plan(args) -> None:
     a, veto, watch = stop_levels(k1d)
     if a is None:
         raise SystemExit(f"{sym}: fewer than 15 weekday candles, so no ATR14 yet — skip this contract")
+    proxy, p_close, p_ema = market_trend(fnd["market"])
     entry, note = args.entry or mark, ""
     sign = 1 if side == "LONG" else -1
     if abs(entry / mark - 1) <= args.entry_band:
@@ -1314,6 +1343,8 @@ def plan(args) -> None:
         f"|mark - index| / index <= {MAX_MARK_INDEX_DEV * 100:.2f}% (actual {mark_index_dev * 100:.3f}%)": (
             mark_index_dev <= MAX_MARK_INDEX_DEV
         ),
+        f"market trend allows {side} ({proxy} close {p_close:.6g} {'>=' if sign > 0 else '<='}"
+        f" EMA{TREND_EMA} {p_ema:.6g})": (p_close - p_ema) * sign >= 0,
         "stop >= 1 ATR": risk_unit >= a,
         f"stop <= {limit * 100:.2f}% (x{args.leverage} liquidation buffer)": risk_unit / entry <= limit,
         f"gross R:R >= {args.min_rr}": reward_unit / risk_unit >= args.min_rr,

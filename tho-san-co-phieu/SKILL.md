@@ -26,13 +26,15 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
 | R:R gộp | ≥ 1,5 (`plan` in thêm `net R:R` sau phí taker 2 chiều 0,10%) |
 | Vào ngay | entry trong ±0,5% giá mark; xa hơn là lệnh chờ (`limit` nếu chờ hồi, `stop` nếu đánh phá vỡ) |
 | KQKD | Không giữ lệnh qua ngày KQKD: `plan` FAIL nếu KQKD rơi vào `--horizon-days` (mặc định 20). Muốn vào trước KQKD thì rút `--horizon-days` để đóng trước ngày đó và ghi vào **Sai nếu**; không thì bỏ lệnh. Ngày đã xác nhận bằng tin thì truyền `--earnings-date YYYY-MM-DD`; nó thay ngày của script |
-| Tầm nhìn | ≤ 20 ngày; tối đa 3 lệnh mở cùng lúc (lệnh chờ khớp cộng lệnh đã khớp đang chạy). `plan --log` từ chối lệnh thứ 4 |
+| Xu hướng thị trường | `plan` FAIL lệnh LONG khi QQQ (mã `KR`: EWY) đóng cửa ngày gần nhất dưới EMA20, FAIL lệnh SHORT khi trên EMA20. Dòng `Xu hướng` của `scan` cho biết chiều nào được dựng. Lý do: 30/10–20/11 QQQ đóng dưới EMA20 mọi phiên, và cả 7 lệnh LONG khớp đều chạm stop |
+| Tầm nhìn | ≤ 20 ngày; tối đa 3 lệnh mở cùng lúc (lệnh chờ khớp cộng lệnh đã khớp đang chạy), tối đa 2 lệnh cùng chiều, không có 2 lệnh cùng mã cùng chiều. `plan --log` từ chối lệnh vượt các mức này |
 | Hạng | `plan` in `Hạng tối đa`. Là B khi stop dính `WARN`, khi lệnh chờ có 24 giờ hiệu lực trùm một sự kiện vĩ mô Mỹ (CPI, PPI, việc làm, FOMC; lịch nằm ở `macro_events.json`, gốc repo skills), hoặc khi entry chờ cách mark hơn 1 ATR. Báo cáo được hạ hạng, **không được nâng** |
 
 ## Quy trình
 `hunt_stock_data.py` dưới đây là `python3 ~/.gemini/config/skills/tho-san-co-phieu/scripts/hunt_stock_data.py`.
 
 1. **Quét:** `hunt_stock_data.py scan [--market all|us|kr|hk|cn|adr|pre]`. Lệnh mất khoảng 1 phút và quét mọi hợp đồng có thanh khoản từ 1 triệu USD/24h (khoảng 120 mã). Đừng tự thêm `--top 40`: cắt ở 40 mã sẽ chỉ còn nhóm công nghệ.
+   - Dòng `Xu hướng` (ngay sau dòng tóm tắt): QQQ cho mọi mã trừ `KR`, EWY cho mã `KR`. `chỉ SHORT` nghĩa là `plan` FAIL mọi lệnh LONG của nhóm đó, `chỉ LONG` thì ngược lại; chỉ dựng setup theo chiều được phép.
    - Săn mã cờ `OK` (đòn bẩy mặc định) và `OKxN` (dùng `--leverage N`).
    - Bỏ `ATR` (quá biến động kể cả ở x2, hoặc chưa đủ 15 phiên để tính ATR), `PUMP` (nhảy ≥ 20%/24h hoặc funding cực đoan) và `INDEX`.
    - Cột `sector` và dòng cuối `Tradeable by sector` cho biết mã giao dịch được thuộc những ngành nào.
@@ -53,7 +55,7 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
    - Lệnh: `hunt_stock_data.py detail SYM1 SYM2 ...` (mức giá theo ATR, vị thế nhỏ lẻ và top trader, định giá và tăng trưởng quy USD, bảng quý SEC nếu công ty nộp 10-Q, nến hôm nay, nến 4h).
    - Dòng `OKX <hợp đồng>`: giá OKX so với Binance, volume 24h trên OKX, 1 hợp đồng bằng bao nhiêu cổ phiếu, đòn bẩy tối đa.
    - Dòng `OKX crowd 100d`: OI, L/S nhỏ lẻ, top trader và taker của riêng OKX trong 100 ngày (`pct100` là phân vị 100 ngày), cùng funding OKX, tức khoản người dùng thực trả. Ngày OKX bắt đầu lúc 16:00 UTC, nên dòng mới nhất là ngày đang chạy.
-4. **Dựng setup, chiều nào cũng được:** ưu tiên LONG cổ phiếu tăng trưởng doanh thu/EPS mạnh, hưởng lợi chu kỳ ngành của chính nó (bán dẫn/AI, phần mềm, y tế, tiêu dùng, tài chính, công nghiệp, năng lượng…) đang hồi về hỗ trợ/EMA; ưu tiên SHORT cổ phiếu suy giảm cơ bản, định giá quá cao, hoặc nhỏ lẻ fomo quá nóng khi gãy cấu trúc. Stop đặt ở mức luận điểm sai **và** vượt qua đỉnh/đáy swing gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
+4. **Dựng setup theo chiều dòng `Xu hướng` cho phép:** khi được LONG, ưu tiên cổ phiếu tăng trưởng doanh thu/EPS mạnh, hưởng lợi chu kỳ ngành của chính nó (bán dẫn/AI, phần mềm, y tế, tiêu dùng, tài chính, công nghiệp, năng lượng…) đang hồi về hỗ trợ/EMA; khi được SHORT, ưu tiên cổ phiếu suy giảm cơ bản, định giá quá cao, hoặc nhỏ lẻ fomo quá nóng khi gãy cấu trúc. Stop đặt ở mức luận điểm sai **và** vượt qua đỉnh/đáy swing gần đó; target ở mức cấu trúc (hỗ trợ, kháng cự, EMA).
    - Dò stop bằng `hunt_stock_data.py stops LONG|SHORT SYM [--span 0.07] [--step 0.005]`, đừng viết script dò riêng. Lệnh này in, cho từng entry tính từ mark, mức stop chặt nhất mà `plan` cho qua. Mục tiêu 1,5R/2R đi kèm chỉ để tham chiếu. `WARN near` là đỉnh/đáy 20 phiên gần ngay sát stop.
 5. **Kiểm từng lệnh ngay trước khi báo:** `hunt_stock_data.py plan LONG|SHORT SYM --stop X --target Y [--entry E] [--capital C] [--horizon-days N] [--earnings-date YYYY-MM-DD]`.
    - `FAIL` thì sửa mức hoặc bỏ lệnh.
@@ -65,6 +67,8 @@ Tự săn hợp đồng vĩnh cửu cổ phiếu (`TRADIFI_PERPETUAL`) trên Bin
      - `LOG: #id`: lệnh mới.
      - `LOG: trùng #id`: lệnh cũ còn hiệu lực, báo cáo ghi "giữ #id".
      - `LOG: từ chối, sổ đã có 3 lệnh mở`: hủy lệnh chờ yếu nhất (`orders --cancel ID`) rồi chạy lại, hoặc đưa lệnh này vào **Đã loại** với lý do đủ 3 lệnh.
+     - `LOG: từ chối, đã có #id <chiều> <MÃ> đang mở`: mỗi ý tưởng chỉ một lệnh, báo cáo ghi "giữ #id". Muốn đổi mức của lệnh còn chờ khớp thì `orders --cancel ID` rồi chạy lại.
+     - `LOG: từ chối, sổ đã có 2 lệnh <chiều> mở`: hủy lệnh chờ yếu nhất cùng chiều rồi chạy lại, hoặc đưa lệnh này vào **Đã loại** với lý do đủ 2 lệnh cùng chiều.
 6. **Lệnh cũ:** chạy `hunt_stock_data.py orders`. Nó đọc sổ lệnh 20 ngày ở `~/.local/share/tho-san-co-phieu/orders.json` và tính trạng thái từ nến Binance. Không lấy lệnh cũ từ file báo cáo.
    - `CHỜ`: quyết định giữ, hủy (`orders --cancel ID`), hoặc thay (hủy trước, rồi `plan --log` lệnh mới).
    - `KHỚP … đang chạy` / `chạm TP` / `chạm stop`: lệnh đã khớp trên giấy. Hỏi người dùng có vào thật không, nêu R hiện tại và mức đóng sớm. `orders --cancel` sẽ từ chối các lệnh này.
@@ -141,7 +145,9 @@ _Phân tích tham khảo, không phải lời khuyên đầu tư._
 | Đoán thị trường và giờ sàn theo tên mã | Dùng cột `mkt`: `SKHY` là ADR giờ Mỹ, `ZHONGJI`/`GIGADEV` là H-share Hồng Kông |
 | Chọn mã vừa nhảy mạnh vì ATR nến đóng còn nhỏ | Bỏ mã cờ `PUMP` |
 | Phân tích BCTC cho mã `PRE` | Mã `PRE` chưa niêm yết, không có BCTC; chỉ dựa vào tin và vị thế |
-| Ba lệnh cùng chiều cùng nhóm ngành (bán dẫn/AI) không cảnh báo | Nêu tương quan, khuyên tối đa 2 lệnh cùng nhóm |
+| Ba lệnh cùng chiều cùng nhóm ngành (bán dẫn/AI) không cảnh báo | `plan --log` chỉ cho 2 lệnh cùng chiều; 2 lệnh đó cùng nhóm ngành thì nêu tương quan trong **Quản lý rủi ro** |
+| Mua bắt đáy liên tục khi thị trường giảm (30/10–20/11: 7/7 lệnh LONG khớp chạm stop; lệnh mua dưới giá khớp 7/10 lần, lệnh bán trên giá chỉ 2/7, vì giá giảm chỉ chạm lệnh mua) | Dựng theo dòng `Xu hướng`; `plan` FAIL lệnh ngược xu hướng QQQ/EWY. Không đổi mã proxy, không bỏ qua dòng FAIL |
+| Ghi lại cùng một ý tưởng nhiều lần (AVGO LONG được gọi 4 lần từ 30/10 tới 13/11; #2 vào khi lệnh 12/11 đã khớp) | `plan --log` từ chối lệnh thứ hai cùng mã cùng chiều: quản lý lệnh đang có, không mở thêm |
 | Chỉ soi và chỉ báo cáo chip/AI (các lượt săn 06–13/11 chỉ ra AVGO, TSM, META, GOOGL, TSLA), vì `scan` từng cắt ở 40 mã mà 29/40 là công nghệ | Quét toàn bộ, không tự thêm `--top`; chọn mã soi kỹ theo bước 3 (tối đa 3 mã/ngành, ít nhất 1–2 mã ngoài bán dẫn/AI khi có) |
 | Bỏ mã `OKxN` vì nghĩ là "quá biến động", hoặc chạy `plan` ở x5 cho mã `OKx3` | `OKxN` vẫn giao dịch được: chạy `stops` / `plan` với `--leverage N` và dán dòng Size có `(xN)` |
 | Đề xuất mã chỉ có trên Binance (Tencent, ANET…), hoặc tự quy đổi size từ cổ phiếu sang hợp đồng | Chỉ chọn mã có trong bảng `scan`; `plan` chặn mã không có trên OKX; dán nguyên dòng Size (đã là số hợp đồng OKX) |

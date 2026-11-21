@@ -113,8 +113,8 @@ def _fake_exchange(monkeypatch, bars: list, tv_info: dict | None = None, bases: 
     _fake_okx(monkeypatch, [_okx_stock(b) for b in bases])
 
 
-def _plan(monkeypatch, capsys, *argv: str) -> str:
-    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "plan", "LONG", "TEST", *argv])
+def _plan(monkeypatch, capsys, *argv: str, side: str = "LONG", sym: str = "TEST") -> str:
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "plan", side, sym, *argv])
     h.main()
     return capsys.readouterr().out
 
@@ -512,17 +512,45 @@ def test_levels_reach_old_swings_and_a_fresh_extreme(monkeypatch):
 
 def test_plan_log_refuses_a_fourth_open_order(monkeypatch, capsys, tmp_path):
     # 14/11 the stock book held 3 pending limits plus a filled one, though the skill allows 3 trades.
-    _fake_exchange(monkeypatch, _daily_bars(68))  # every fake candle predates the orders, so none of them fills
+    # every fake candle predates the orders, so none of them fills
+    _fake_exchange(monkeypatch, _daily_bars(68), bases=("TEST", "OTHER", "THIRD", "FOURTH"))
     path = tmp_path / "orders.json"
     monkeypatch.setattr(h, "ORDERS", path, raising=False)
-    for stop in ("94.8", "94.7", "94.6"):
-        assert "LOG: #" in _plan(monkeypatch, capsys, "--entry", "99", "--stop", stop, "--target", "110", "--log")
+    for sym, side, argv in (("TEST", "LONG", LONG_99), ("OTHER", "LONG", LONG_99), ("THIRD", "SHORT", SHORT_101)):
+        assert "LOG: #" in _plan(monkeypatch, capsys, *argv, "--log", side=side, sym=sym)
     with pytest.raises(SystemExit, match="3 lệnh"):
-        _plan(monkeypatch, capsys, "--entry", "99", "--stop", "94.5", "--target", "110", "--log")
+        _plan(monkeypatch, capsys, *SHORT_101, "--log", side="SHORT", sym="FOURTH")
     assert len(json.loads(path.read_text())) == 3
     monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "orders", "--cancel", "1"])
     h.main()  # a canceled order no longer counts
-    assert "LOG: #4" in _plan(monkeypatch, capsys, "--entry", "99", "--stop", "94.5", "--target", "110", "--log")
+    assert "LOG: #4" in _plan(monkeypatch, capsys, *SHORT_101, "--log", side="SHORT", sym="FOURTH")
+
+
+# Passing levels on the 98-102 fake candles (ATR 4, mark 100): a buy limit under and a sell limit over the mark.
+LONG_99 = ("--entry", "99", "--stop", "94.8", "--target", "110")
+SHORT_101 = ("--entry", "101", "--stop", "105.2", "--target", "90")
+
+
+def test_plan_log_refuses_a_second_open_order_on_the_same_stock_and_side(monkeypatch, capsys, tmp_path):
+    # 13/11 #2 AVGO LONG 349 went in after the 12/11 AVGO LONG 348.5 had filled: one idea, two stops.
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    path = tmp_path / "orders.json"
+    monkeypatch.setattr(h, "ORDERS", path, raising=False)
+    assert "LOG: #1" in _plan(monkeypatch, capsys, *LONG_99, "--log")
+    with pytest.raises(SystemExit, match="#1 LONG TESTUSDT"):
+        _plan(monkeypatch, capsys, "--entry", "99", "--stop", "94.7", "--target", "110", "--log")
+    assert len(json.loads(path.read_text())) == 1
+
+
+def test_plan_log_refuses_a_third_open_order_on_one_side(monkeypatch, capsys, tmp_path):
+    # 16/11 afternoon three stock LONGs were open at once (AVGO running, XOM and UNITREE waiting); all three stopped.
+    _fake_exchange(monkeypatch, _daily_bars(68), bases=("TEST", "OTHER", "THIRD"))
+    monkeypatch.setattr(h, "ORDERS", tmp_path / "orders.json", raising=False)
+    for sym in ("TEST", "OTHER"):
+        assert "LOG: #" in _plan(monkeypatch, capsys, *LONG_99, "--log", sym=sym)
+    with pytest.raises(SystemExit, match="2 lệnh LONG"):
+        _plan(monkeypatch, capsys, *LONG_99, "--log", sym="THIRD")
+    assert "LOG: #3" in _plan(monkeypatch, capsys, *SHORT_101, "--log", side="SHORT", sym="THIRD")
 
 
 def test_plan_takes_an_earnings_date_confirmed_by_news(monkeypatch, capsys):
@@ -630,3 +658,66 @@ def test_scan_keeps_only_stocks_on_okx_and_still_measures_against_spy(monkeypatc
     rows = json.loads((tmp_path / "market.json").read_text())["rows"]
     assert [r["symbol"] for r in rows] == ["TESTUSDT"]
     assert rows[0]["rs20_vs_spy"] == 0.0  # same candles as SPY
+
+
+# --- Market trend: 30/10-20/11 QQQ closed under its EMA20 every session and all 7 LONG fills hit their stop ---
+
+FALLING = [200.0 - i for i in range(60)]
+RISING = [100.0 + i for i in range(60)]
+
+
+def _trend(monkeypatch, **closes: list[float]) -> None:
+    """Daily closes for the index proxies (QQQUSDT=[...]); every other symbol keeps the candles already faked."""
+    inner = h.get_binance
+
+    def get_binance(path: str, **params):
+        series = closes.get(params.get("symbol"))
+        if path != "/fapi/v1/klines" or series is None:
+            return inner(path, **params)
+        days = [MONDAY + timedelta(days=i) for i in range(len(series) + 1)]  # the extra day is the forming candle
+        return [[int(d.timestamp() * 1000), str(c), str(c), str(c), str(c)] for d, c in zip(days, series + series[-1:])]
+
+    monkeypatch.setattr(h, "get_binance", get_binance)
+
+
+@pytest.mark.parametrize("side, argv, qqq, want", [
+    ("LONG", LONG_99, FALLING, "FAIL"),
+    ("LONG", LONG_99, RISING, "PASS"),
+    ("SHORT", SHORT_101, RISING, "FAIL"),
+    ("SHORT", SHORT_101, FALLING, "PASS"),
+])
+def test_plan_only_lets_the_side_of_the_qqq_trend_through(monkeypatch, capsys, side, argv, qqq, want):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    _trend(monkeypatch, QQQUSDT=qqq)
+    out = _plan(monkeypatch, capsys, *argv, side=side)
+    assert _check(out, "market trend") == want
+    assert f"VERDICT: {want}" in out
+
+
+def test_plan_reads_a_korean_stock_against_ewy_not_qqq(monkeypatch, capsys):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    inner = h.get_binance
+
+    def korean(path: str, **params):
+        rows = inner(path, **params)
+        if path == "/fapi/v1/exchangeInfo":
+            rows = {"symbols": [dict(s, underlyingType="KR_EQUITY") for s in rows["symbols"]]}
+        return rows
+
+    monkeypatch.setattr(h, "get_binance", korean)
+    _trend(monkeypatch, QQQUSDT=FALLING, EWYUSDT=RISING)
+    out = _plan(monkeypatch, capsys, *LONG_99)
+    assert _check(out, "market trend") == "PASS"
+    assert "EWYUSDT" in out
+
+
+def test_scan_says_which_side_each_trend_lets_through(monkeypatch, capsys, tmp_path):
+    _fake_exchange(monkeypatch, _daily_bars(68))
+    _trend(monkeypatch, QQQUSDT=FALLING, EWYUSDT=RISING)
+    monkeypatch.setattr(h, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(h, "OUT", tmp_path / "market.json")
+    monkeypatch.setattr(sys, "argv", ["hunt_stock_data.py", "scan"])
+    h.main()
+    trend = [x for x in capsys.readouterr().out.splitlines() if x.startswith("Xu hướng")]
+    assert len(trend) == 1
+    assert trend[0].index("QQQUSDT") < trend[0].index("chỉ SHORT") < trend[0].index("EWYUSDT") < trend[0].index("chỉ LONG")
